@@ -1,0 +1,167 @@
+PanelWidgetClass {
+ color 0.18 0.2 0.24 0.95
+ position 0 0
+ size 320 120
+ hexactpos 1
+ vexactpos 1
+ hexactsize 1
+ vexactsize 1
+ style DayZDefaultPanel
+ {
+  // Accent border
+  PanelWidgetClass AccentBorder {
+   color 0.6 0.45 0.15 0.6
+   position 0 0
+   size 320 3
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+  }
+  
+  // Main content border
+  PanelWidgetClass ContentBorder {
+   color 0.25 0.28 0.32 0.4
+   position 2 2
+   size 316 116
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+  }
+  
+  // Item image container
+  PanelWidgetClass ImageContainer {
+   color 0.12 0.15 0.18 0.8
+   position 8 8
+   size 70 70
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   {
+    ImageWidgetClass ItemImage {
+     position 3 3
+     size 64 64
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     image0 "set:dayz_inventory image:missing"
+     mode blend
+     "src alpha" 1
+     "no wrap" 0
+     stretch 1
+    }
+   }
+  }
+  
+  // Item details section
+  PanelWidgetClass DetailsPanel {
+   color 0.08 0.1 0.12 0.3
+   position 85 8
+   size 150 70
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   {
+    TextWidgetClass ItemName {
+     text "Item Name"
+     font "gui/fonts/metron_light16"
+     position 8 5
+     size 134 20
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     style Bold
+     "text halign" left
+     "text valign" center
+     "text color" 0.95 0.95 1 1
+    }
+    
+    TextWidgetClass ItemQuantity {
+     text "Qty: 1"
+     font "gui/fonts/metron_light13"
+     position 8 25
+     size 80 16
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     "text halign" left
+     "text valign" center
+     "text color" 0.8 0.9 1 1
+    }
+    
+    TextWidgetClass ItemStatus {
+     text "Status: Pending"
+     font "gui/fonts/metron_light13"
+     position 8 42
+     size 120 16
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     "text halign" left
+     "text valign" center
+     "text color" 1 0.9 0.3 1
+    }
+    
+    TextWidgetClass AttachmentInfo {
+     text "Attachments: None"
+     font "gui/fonts/metron_light11"
+     position 8 58
+     size 134 12
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     "text halign" left
+     "text valign" center
+     "text color" 0.5 0.7 0.9 1
+    }
+   }
+  }
+  
+  // Action button area
+  PanelWidgetClass ActionPanel {
+   color 0.05 0.08 0.1 0.4
+   position 245 25
+   size 65 70
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+   {
+    ButtonWidgetClass ReceiveButton {
+     text "RECEIVE"
+     font "gui/fonts/metron_light13"
+     position 5 20
+     size 55 30
+     hexactpos 1
+     vexactpos 1
+     hexactsize 1
+     vexactsize 1
+     style Bold
+     "text halign" center
+     "text valign" center
+     "text color" 1 1 1 1
+     "background color" 0.15 0.55 0.2 0.9
+    }
+   }
+  }
+  
+  // Status indicator
+  PanelWidgetClass StatusIndicator {
+   color 1 0.8 0.2 0.8
+   position 315 5
+   size 5 110
+   hexactpos 1
+   vexactpos 1
+   hexactsize 1
+   vexactsize 1
+  }
+ }
+}
