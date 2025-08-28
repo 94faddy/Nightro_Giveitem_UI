@@ -7,6 +7,11 @@ modded class MissionGameplay
     void MissionGameplay()
     {
         NightroItemGiverUIManager.Init();
+        
+        if (GetGame().IsClient())
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] MissionGameplay initialized on client");
+        }
     }
     
     override void OnKeyPress(int key)
@@ -23,6 +28,7 @@ modded class MissionGameplay
             PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
             if (player && player.IsAlive() && !player.IsUnconscious() && !player.IsRestrained())
             {
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Ctrl+I pressed, toggling menu");
                 NightroItemGiverUIManager.ToggleMenu();
                 m_NightroKeyComboTriggered = true; // Prevent multiple triggers
             }
@@ -57,5 +63,23 @@ modded class MissionGameplay
         
         // Additional input handling if needed
         // Currently everything is handled in OnKeyPress/OnKeyRelease
+    }
+    
+    // CRITICAL: Handle sync messages from server
+    void SendNightroNotification(string message, string color = "ColorWhite")
+    {
+        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+        if (player)
+        {
+            // Check if this is a sync message
+            if (message.IndexOf("[NIGHTRO_SYNC_") == 0)
+            {
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Received sync message from server");
+                NightroItemSyncClient.ProcessSyncMessage(message);
+                return; // Don't display sync messages as regular chat
+            }
+            
+            GetGame().ChatMP(player, message, color);
+        }
     }
 }

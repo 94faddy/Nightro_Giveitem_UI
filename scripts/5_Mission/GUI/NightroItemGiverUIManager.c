@@ -4,7 +4,7 @@ class NightroItemGiverUIManager
     
     static void Init()
     {
-        // Initialize UI manager
+        PrintFormat("[NIGHTRO CLIENT DEBUG] UI Manager initialized");
     }
     
     static void ToggleMenu()
@@ -26,6 +26,8 @@ class NightroItemGiverUIManager
         PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
         if (!player || !player.IsAlive()) return;
         
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Opening item giver menu");
+        
         m_Menu = new NightroItemGiverMenu;
         GetGame().GetUIManager().ShowScriptedMenu(m_Menu, NULL);
     }
@@ -34,6 +36,7 @@ class NightroItemGiverUIManager
     {
         if (m_Menu)
         {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Closing item giver menu");
             GetGame().GetUIManager().HideScriptedMenu(m_Menu);
             m_Menu = NULL;
         }
@@ -42,6 +45,15 @@ class NightroItemGiverUIManager
     static bool IsMenuOpen()
     {
         return (m_Menu != NULL);
+    }
+    
+    static void RefreshMenuIfOpen()
+    {
+        if (m_Menu)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Refreshing open menu");
+            m_Menu.LoadPendingItems();
+        }
     }
     
     static bool CanReceiveItem(PlayerBase player, ref ItemInfo itemData, out string errorMessage)
@@ -79,7 +91,7 @@ class NightroItemGiverUIManager
             return false;
         }
         
-        // Check territory requirements
+        // Territory check (simplified client-side version)
         LBGroup playerGroup = GetPlayerGroup(player);
         if (!playerGroup)
         {
@@ -114,85 +126,12 @@ class NightroItemGiverUIManager
     {
         if (!player || !player.GetIdentity() || !itemData) return false;
         
-        string steamID = player.GetIdentity().GetPlainId();
-        string filePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        PrintFormat("[NIGHTRO CLIENT DEBUG] CLIENT: Requesting item delivery: %1x %2", itemData.quantity, itemData.classname);
         
-        if (!FileExist(filePath)) return false;
+        // Send delivery request to server via sync system
+        NightroItemSyncClient.RequestItemDelivery(itemData.classname, itemData.quantity);
         
-        ItemQueue itemQueue = new ItemQueue();
-        JsonFileLoader<ItemQueue>.JsonLoadFile(filePath, itemQueue);
-        
-        if (!itemQueue || !itemQueue.items_to_give) return false;
-        
-        // Find and process the item
-        for (int i = 0; i < itemQueue.items_to_give.Count(); i++)
-        {
-            ItemInfo queueItem = itemQueue.items_to_give.Get(i);
-            if (queueItem && queueItem.classname == itemData.classname && queueItem.quantity == itemData.quantity)
-            {
-                // Give items to player
-                int itemsGiven = 0;
-                for (int j = 0; j < queueItem.quantity; j++)
-                {
-                    EntityAI item = player.GetInventory().CreateInInventory(queueItem.classname);
-                    if (item)
-                    {
-                        itemsGiven++;
-                        
-                        // Handle attachments
-                        if (queueItem.attachments && queueItem.attachments.Count() > 0)
-                        {
-                            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(AttachItemsToWeapon, 300, false, item, queueItem.attachments, player);
-                        }
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-                
-                if (itemsGiven > 0)
-                {
-                    // Mark as delivered and move to processed
-                    queueItem.status = "delivered";
-                    queueItem.processed_at = GetCurrentTimestamp();
-                    
-                    ProcessedItemInfo processedItem = new ProcessedItemInfo();
-                    processedItem.classname = queueItem.classname;
-                    processedItem.quantity = itemsGiven;
-                    processedItem.status = "delivered";
-                    processedItem.processed_at = GetCurrentTimestamp();
-                    
-                    if (queueItem.attachments && queueItem.attachments.Count() > 0)
-                    {
-                        processedItem.attachments = new array<ref AttachmentInfo>;
-                        for (int k = 0; k < queueItem.attachments.Count(); k++)
-                        {
-                            AttachmentInfo originalAttachment = queueItem.attachments.Get(k);
-                            AttachmentInfo copyAttachment = new AttachmentInfo();
-                            copyAttachment.classname = originalAttachment.classname;
-                            copyAttachment.quantity = originalAttachment.quantity;
-                            copyAttachment.status = "delivered";
-                            processedItem.attachments.Insert(copyAttachment);
-                        }
-                    }
-                    
-                    if (!itemQueue.processed_items)
-                        itemQueue.processed_items = new array<ref ProcessedItemInfo>;
-                    itemQueue.processed_items.Insert(processedItem);
-                    
-                    // Remove from pending items
-                    itemQueue.items_to_give.RemoveOrdered(i);
-                    
-                    // Save updated queue
-                    JsonFileLoader<ItemQueue>.JsonSaveFile(filePath, itemQueue);
-                    
-                    return true;
-                }
-            }
-        }
-        
-        return false;
+        return true; // Return true immediately, actual result will come from server
     }
     
     static bool IsValidItemClass(string itemName)

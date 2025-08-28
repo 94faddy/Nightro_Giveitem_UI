@@ -67,8 +67,9 @@ class NightroItemGiverMenu extends UIScriptedMenu
         GetGame().GetInput().ChangeGameFocus(1);
         GetGame().GetUIManager().ShowUICursor(true);
         
-        // Force refresh when showing
-        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 100, false);
+        // Force refresh when showing - request fresh data from server
+        RequestServerSync();
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 500, false);
     }
     
     override void OnHide()
@@ -98,7 +99,8 @@ class NightroItemGiverMenu extends UIScriptedMenu
         else if (w == m_RefreshButton)
         {
             PrintFormat("[NIGHTRO CLIENT DEBUG] Refresh button clicked");
-            LoadPendingItems();
+            RequestServerSync();
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1000, false);
             return true;
         }
         
@@ -115,6 +117,36 @@ class NightroItemGiverMenu extends UIScriptedMenu
         }
         
         return super.OnKeyDown(w, x, y, key);
+    }
+    
+    void RequestServerSync()
+    {
+        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+        if (!player || !player.GetIdentity()) return;
+        
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Requesting server sync for fresh data");
+        
+        // Request fresh data from server by creating a sync request file
+        string steamID = player.GetIdentity().GetPlainId();
+        string requestPath = "$profile:NightroItemGiverData/sync_requests/" + steamID + "_" + GetGame().GetTime() + ".txt";
+        
+        // Ensure directory exists
+        string dirPath = "$profile:NightroItemGiverData/sync_requests/";
+        if (!FileExist(dirPath))
+        {
+            MakeDirectory(dirPath);
+        }
+        
+        // Create sync request file
+        FileHandle requestFile = OpenFile(requestPath, FileMode.WRITE);
+        if (requestFile)
+        {
+            FPrintln(requestFile, "sync_request");
+            CloseFile(requestFile);
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Created sync request file");
+        }
+        
+        UpdateStatusText("Refreshing data from server...");
     }
     
     void LoadPendingItems()
@@ -140,10 +172,9 @@ class NightroItemGiverMenu extends UIScriptedMenu
         if (!FileExist(filePath))
         {
             PrintFormat("[NIGHTRO CLIENT DEBUG] File doesn't exist: %1", filePath);
-            PrintFormat("[NIGHTRO CLIENT WARNING] File should exist based on server notification!");
-            PrintFormat("[NIGHTRO CLIENT WARNING] Server has items but client file missing - potential file sync issue");
-            UpdateEmptyState("Items are being prepared...");
-            UpdateStatusText("File not found - try refreshing in a moment");
+            UpdateEmptyState("Waiting for server data...");
+            UpdateStatusText("Requesting data from server");
+            RequestServerSync(); // Auto-request sync if no file exists
             return;
         }
         
@@ -187,6 +218,15 @@ class NightroItemGiverMenu extends UIScriptedMenu
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue steam_id: '%1'", itemQueue.steam_id);
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue last_updated: '%1'", itemQueue.last_updated);
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue items_to_give exists: %1", itemQueue.items_to_give != null);
+        
+        // Check if this is an empty sync
+        if (itemQueue.last_updated == "empty")
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Received empty sync from server");
+            UpdateEmptyState("No pending items");
+            UpdateStatusText("No items waiting for delivery");
+            return;
+        }
         
         if (!itemQueue.items_to_give)
         {
@@ -426,16 +466,17 @@ class NightroItemGiverMenu extends UIScriptedMenu
         
         if (success)
         {
-            string successMsg = "[NIGHTRO SHOP SUCCESS] Successfully received: " + itemData.quantity.ToString() + "x " + itemData.classname;
-            PrintFormat("[NIGHTRO CLIENT SUCCESS] %1", successMsg);
-            GetGame().ChatMP(player, successMsg, "ColorGreen");
+            string processingMsg = "[NIGHTRO SHOP] Processing delivery request: " + itemData.quantity.ToString() + "x " + itemData.classname;
+            PrintFormat("[NIGHTRO CLIENT SUCCESS] %1", processingMsg);
+            GetGame().ChatMP(player, processingMsg, "ColorYellow");
             
-            // Reload items after successful delivery
-            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 500, false);
+            // Refresh items after short delay to get server response
+            UpdateStatusText("Processing delivery request...");
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 2000, false);
         }
         else
         {
-            string errorMsg = "[NIGHTRO SHOP ERROR] Failed to receive item. Please try again.";
+            string errorMsg = "[NIGHTRO SHOP ERROR] Failed to send delivery request. Please try again.";
             PrintFormat("[NIGHTRO CLIENT ERROR] %1", errorMsg);
             GetGame().ChatMP(player, errorMsg, "ColorRed");
         }
@@ -449,8 +490,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         
         PrintFormat("[NIGHTRO CLIENT DEBUG] === Receive All Items Clicked ===");
         
-        int successCount = 0;
-        int totalCount = 0;
+        int requestCount = 0;
         
         for (int i = 0; i < m_PendingItems.Count(); i++)
         {
@@ -460,54 +500,36 @@ class NightroItemGiverMenu extends UIScriptedMenu
             
             if (item.status == "pending" || item.status == "" || item.status == "inventory_full" || item.status == "territory_failed")
             {
-                totalCount++;
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Processing item %1: %2 x%3", totalCount, item.classname, item.quantity);
-                
                 string errorMessage;
                 if (NightroItemGiverUIManager.CanReceiveItem(player, item, errorMessage))
                 {
                     if (NightroItemGiverUIManager.GiveItemToPlayer(player, item))
                     {
-                        successCount++;
-                        PrintFormat("[NIGHTRO CLIENT DEBUG] Successfully gave item: %1", item.classname);
+                        requestCount++;
+                        PrintFormat("[NIGHTRO CLIENT DEBUG] Sent delivery request for: %1", item.classname);
                     }
                     else
                     {
-                        PrintFormat("[NIGHTRO CLIENT ERROR] Failed to give item: %1", item.classname);
+                        PrintFormat("[NIGHTRO CLIENT ERROR] Failed to send request for item: %1", item.classname);
                     }
                 }
                 else
                 {
-                    PrintFormat("[NIGHTRO CLIENT ERROR] Cannot give item %1: %2", item.classname, errorMessage);
+                    PrintFormat("[NIGHTRO CLIENT ERROR] Cannot request item %1: %2", item.classname, errorMessage);
                 }
             }
         }
         
-        PrintFormat("[NIGHTRO CLIENT DEBUG] Receive all results: %1/%2 items successful", successCount, totalCount);
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Receive all results: %1 delivery requests sent", requestCount);
         
-        if (totalCount > 0)
+        if (requestCount > 0)
         {
-            string resultMsg;
-            if (successCount == totalCount)
-            {
-                resultMsg = "[NIGHTRO SHOP SUCCESS] Successfully received all " + successCount.ToString() + " items!";
-                GetGame().ChatMP(player, resultMsg, "ColorGreen");
-            }
-            else if (successCount > 0)
-            {
-                resultMsg = "[NIGHTRO SHOP PARTIAL] Received " + successCount.ToString() + " out of " + totalCount.ToString() + " items.";
-                GetGame().ChatMP(player, resultMsg, "ColorYellow");
-            }
-            else
-            {
-                resultMsg = "[NIGHTRO SHOP ERROR] No items could be received. Please check the requirements.";
-                GetGame().ChatMP(player, resultMsg, "ColorRed");
-            }
+            string resultMsg = "[NIGHTRO SHOP] Processing " + requestCount.ToString() + " delivery requests. Please wait...";
+            GetGame().ChatMP(player, resultMsg, "ColorYellow");
+            UpdateStatusText("Processing delivery requests...");
             
-            PrintFormat("[NIGHTRO CLIENT DEBUG] %1", resultMsg);
-            
-            // Reload items after delivery attempt
-            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1000, false);
+            // Refresh items after delay to get server response
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 3000, false);
         }
         else
         {

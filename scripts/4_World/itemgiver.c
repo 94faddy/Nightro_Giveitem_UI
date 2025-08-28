@@ -1,4 +1,4 @@
-// ===== ENHANCED ITEMGIVER V3.0 WITH UI SYSTEM (PRODUCTION) - FINAL FIX =====
+// ===== ENHANCED ITEMGIVER V3.0 WITH SYNC SYSTEM (PRODUCTION) =====
 
 class AttachmentInfo
 {
@@ -144,6 +144,8 @@ class NightroItemGiverManager
 {
     private static const string IG_PROFILE_FOLDER = "$profile:NightroItemGiverData/";
     private static const string IG_PENDING_FOLDER = "pending_items/";
+    private static const string IG_DELIVERY_FOLDER = "delivery_requests/";
+    private static const string IG_SYNC_FOLDER = "sync_requests/";
     private static const string IG_SETTINGS_FILE = "notification_settings.json";
     private static bool m_IsInitialized = false;
     private static ref NotificationSettings m_NotificationSettings;
@@ -171,9 +173,29 @@ class NightroItemGiverManager
             MakeDirectory(IG_PROFILE_FOLDER + IG_PENDING_FOLDER);
             PrintFormat("[NIGHTRO SERVER DEBUG] Created directory: %1", IG_PROFILE_FOLDER + IG_PENDING_FOLDER);
         }
+        
+        if (!FileExist(IG_PROFILE_FOLDER + IG_DELIVERY_FOLDER)) 
+        {
+            MakeDirectory(IG_PROFILE_FOLDER + IG_DELIVERY_FOLDER);
+            PrintFormat("[NIGHTRO SERVER DEBUG] Created directory: %1", IG_PROFILE_FOLDER + IG_DELIVERY_FOLDER);
+        }
+        
+        if (!FileExist(IG_PROFILE_FOLDER + IG_SYNC_FOLDER)) 
+        {
+            MakeDirectory(IG_PROFILE_FOLDER + IG_SYNC_FOLDER);
+            PrintFormat("[NIGHTRO SERVER DEBUG] Created directory: %1", IG_PROFILE_FOLDER + IG_SYNC_FOLDER);
+        }
 
         m_PlayerStates = new map<string, ref PlayerStateInfo>;
         LoadNotificationSettings();
+        
+        // Register sync system
+        if (GetGame().IsServer())
+        {
+            NightroItemSyncManager.RegisterEvents();
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessDeliveryRequests, 5000, true);
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessSyncRequests, 3000, true);
+        }
         
         m_IsInitialized = true;
         PrintFormat("[NIGHTRO SERVER DEBUG] NightroItemGiverManager initialized successfully!");
@@ -198,6 +220,150 @@ class NightroItemGiverManager
         
         PrintFormat("[NIGHTRO SERVER DEBUG] UI System enabled: %1", m_NotificationSettings.enable_ui_system);
         PrintFormat("[NIGHTRO SERVER DEBUG] Territory check required: %1", m_NotificationSettings.require_territory_check);
+    }
+
+    // SERVER ONLY: Process delivery requests from clients
+    static void ProcessDeliveryRequests()
+    {
+        if (!GetGame().IsServer()) return;
+        
+        string requestDir = IG_PROFILE_FOLDER + IG_DELIVERY_FOLDER;
+        if (!FileExist(requestDir)) return;
+        
+        // In DayZ, we need to check for specific files rather than list directory
+        // We'll check for files with pattern: steamid_timestamp.txt
+        array<Man> players = new array<Man>;
+        GetGame().GetPlayers(players);
+        
+        for (int i = 0; i < players.Count(); i++)
+        {
+            PlayerBase player = PlayerBase.Cast(players.Get(i));
+            if (!player || !player.GetIdentity()) continue;
+            
+            string steamID = player.GetIdentity().GetPlainId();
+            
+            // Check for request files for this player by trying different timestamps
+            float currentTime = GetGame().GetTime();
+            for (int j = 0; j < 100; j++) // Check last 100 possible timestamps
+            {
+                float checkTime = currentTime - (j * 1000); // Check every 1000ms back
+                string fileName = steamID + "_" + ((int)checkTime).ToString() + ".txt";
+                string filePath = requestDir + fileName;
+                
+                if (FileExist(filePath))
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Found delivery request file: %1", fileName);
+                    
+                    // Read request data
+                    FileHandle requestFile = OpenFile(filePath, FileMode.READ);
+                    if (!requestFile)
+                    {
+                        DeleteFile(filePath);
+                        continue;
+                    }
+                    
+                    string requestData;
+                    FGets(requestFile, requestData);
+                    CloseFile(requestFile);
+                    
+                    // Parse request: itemClass|quantity
+                    array<string> requestParts = new array<string>;
+                    requestData.Split("|", requestParts);
+                    
+                    if (requestParts.Count() < 2)
+                    {
+                        DeleteFile(filePath);
+                        continue;
+                    }
+                    
+                    string itemClass = requestParts.Get(0);
+                    int quantity = requestParts.Get(1).ToInt();
+                    
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Processing delivery request: %1x %2 for %3", quantity, itemClass, steamID);
+                    
+                    // Process the delivery
+                    string errorMessage;
+                    bool success = NightroItemSyncManager.DeliverItemToPlayer(player, itemClass, quantity, errorMessage);
+                    
+                    if (!success && errorMessage != "")
+                    {
+                        GetGame().ChatMP(player, errorMessage, "ColorRed");
+                    }
+                    
+                    // Delete request file
+                    DeleteFile(filePath);
+                    break; // Process one request per player per cycle
+                }
+            }
+        }
+    }
+
+    // SERVER ONLY: Process sync requests from clients
+    static void ProcessSyncRequests()
+    {
+        if (!GetGame().IsServer()) return;
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: ProcessSyncRequests() called");
+        
+        string requestDir = IG_PROFILE_FOLDER + IG_SYNC_FOLDER;
+        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Checking directory: %1", requestDir);
+        
+        if (!FileExist(requestDir)) 
+        {
+            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Sync request directory doesn't exist, creating...");
+            MakeDirectory(requestDir);
+            return;
+        }
+        
+        // Get all connected players
+        array<Man> players = new array<Man>;
+        GetGame().GetPlayers(players);
+        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Found %1 connected players", players.Count());
+        
+        for (int i = 0; i < players.Count(); i++)
+        {
+            PlayerBase player = PlayerBase.Cast(players.Get(i));
+            if (!player || !player.GetIdentity()) continue;
+            
+            string steamID = player.GetIdentity().GetPlainId();
+            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Checking sync requests for player: %1", steamID);
+            
+            // Check for sync request files for this player
+            float currentTime = GetGame().GetTime();
+            bool foundRequest = false;
+            
+            for (int j = 0; j < 200; j++) // Check more timestamps
+            {
+                float checkTime = currentTime - (j * 500); // Check every 500ms back
+                string fileName = steamID + "_" + ((int)checkTime).ToString() + ".txt";
+                string filePath = requestDir + fileName;
+                
+                if (FileExist(filePath))
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Found sync request file: %1", fileName);
+                    foundRequest = true;
+                    
+                    // Send current data to client IMMEDIATELY
+                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 100, false, player);
+                    
+                    // Delete request file
+                    DeleteFile(filePath);
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Deleted sync request file and queued sync");
+                    break; // Process one request per player per cycle
+                }
+            }
+            
+            if (!foundRequest)
+            {
+                // Check if player has items but no sync request - auto sync
+                bool hasItems = NightroItemGiverManager.HasPendingItems(player);
+                if (hasItems)
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Player %1 has items but no recent sync request, forcing sync", steamID);
+                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 100, false, player);
+                }
+            }
+        }
     }
 
     static bool HasPendingItems(PlayerBase player)
@@ -228,7 +394,7 @@ class NightroItemGiverManager
         for (int i = 0; i < itemQueue.items_to_give.Count(); i++)
         {
             ItemInfo item = itemQueue.items_to_give.Get(i);
-            if (item && item.classname != "" && item.quantity > 0)
+            if (item && item.classname != "" && item.quantity > 0 && item.status == "pending")
             {
                 itemCount++;
             }
@@ -763,93 +929,6 @@ class NightroItemGiverManager
         return "updated";
     }
     
-    static void UpdateJsonFileWithStatus(string filePath, array<ref ItemInfo> remainingItems, ref ItemQueue itemQueue, PlayerBase player)
-    {
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Updating JSON file: %1", filePath);
-        
-        ItemQueue updatedQueue = new ItemQueue();
-        
-        if (player && player.GetIdentity())
-        {
-            updatedQueue.player_name = player.GetIdentity().GetName();
-            updatedQueue.steam_id = player.GetIdentity().GetPlainId();
-            updatedQueue.last_updated = GetCurrentDateTime();
-        }
-        
-        if (remainingItems && remainingItems.Count() > 0)
-        {
-            updatedQueue.items_to_give = remainingItems;
-            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Saving %1 remaining items", remainingItems.Count());
-        }
-        
-        if (itemQueue.processed_items && itemQueue.processed_items.Count() > 0)
-        {
-            updatedQueue.processed_items = itemQueue.processed_items;
-            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Saving %1 processed items", itemQueue.processed_items.Count());
-        }
-
-        if (itemQueue.player_state)
-        {
-            updatedQueue.player_state = itemQueue.player_state;
-            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Saving player state");
-        }
-        
-        JsonFileLoader<ItemQueue>.JsonSaveFile(filePath, updatedQueue);
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: JSON file updated successfully");
-    }
-    
-    static void UpdateJsonFile(string filePath, array<ref ItemInfo> remainingItems, PlayerBase player)
-    {
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Updating JSON file (simple): %1", filePath);
-        
-        ItemQueue updatedQueue = new ItemQueue();
-        
-        if (player && player.GetIdentity())
-        {
-            updatedQueue.player_name = player.GetIdentity().GetName();
-            updatedQueue.steam_id = player.GetIdentity().GetPlainId();
-            updatedQueue.last_updated = GetCurrentDateTime();
-        }
-        
-        if (remainingItems && remainingItems.Count() > 0)
-        {
-            updatedQueue.items_to_give = remainingItems;
-            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Saving %1 items", remainingItems.Count());
-        }
-        
-        JsonFileLoader<ItemQueue>.JsonSaveFile(filePath, updatedQueue);
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: JSON file updated successfully");
-    }
-    
-    static void ClearJsonFile(string filePath, PlayerBase player)
-    {
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Clearing JSON file: %1", filePath);
-        
-        ItemQueue emptyQueue = new ItemQueue();
-        
-        if (player && player.GetIdentity())
-        {
-            emptyQueue.player_name = player.GetIdentity().GetName();
-            emptyQueue.steam_id = player.GetIdentity().GetPlainId();
-            emptyQueue.last_updated = GetCurrentDateTime();
-        }
-        
-        JsonFileLoader<ItemQueue>.JsonSaveFile(filePath, emptyQueue);
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: JSON file cleared");
-    }
-    
-    // Legacy compatibility - no longer used in UI system but kept for API compatibility
-    static void SendNotification(PlayerBase player, string classname, int quantity)
-    {
-        if (!m_NotificationSettings || !player) return;
-
-        string templateMsg = m_NotificationSettings.message_template;
-        templateMsg.Replace("{CLASS_NAME}", classname);
-        templateMsg.Replace("{QUANTITY}", quantity.ToString());
-
-        GetGame().ChatMP(player, templateMsg, "ColorGreen");
-    }
-    
     // Get notification settings for UI system
     static NotificationSettings GetNotificationSettings()
     {
@@ -876,15 +955,19 @@ modded class PlayerBase
             bool hasItems = NightroItemGiverManager.HasPendingItems(this);
             if (hasItems)
             {
-                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items, UI system will handle delivery", GetIdentity().GetPlainId());
+                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items, syncing to client", GetIdentity().GetPlainId());
                 
                 // Send notification about items available
                 string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
                 GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 3000, false, this, notifyMsg, "ColorYellow");
+                
+                // Sync data to client
+                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 5000, false, this);
             }
             else
             {
-                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has no pending items", GetIdentity().GetPlainId());
+                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has no pending items, sending empty sync", GetIdentity().GetPlainId());
+                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 3000, false, this);
             }
         }
     }
@@ -908,6 +991,13 @@ modded class PlayerBase
                     
                     string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
                     GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 2000, false, this, notifyMsg, "ColorYellow");
+                    
+                    // Sync data to client
+                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 3000, false, this);
+                }
+                else
+                {
+                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 2000, false, this);
                 }
             }
         }
