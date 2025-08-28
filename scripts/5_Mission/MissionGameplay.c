@@ -61,8 +61,40 @@ modded class MissionGameplay
     {
         super.OnUpdate(timeslice);
         
-        // Additional input handling if needed
-        // Currently everything is handled in OnKeyPress/OnKeyRelease
+        // Check for sync messages via file system every 2 seconds
+        static float lastSyncCheck = 0;
+        if (GetGame().GetTime() - lastSyncCheck > 2000)
+        {
+            lastSyncCheck = GetGame().GetTime();
+            CheckForSyncUpdates();
+        }
+    }
+    
+    void CheckForSyncUpdates()
+    {
+        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+        if (!player || !player.GetIdentity()) return;
+        
+        string steamID = player.GetIdentity().GetPlainId();
+        string serverFile = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        
+        if (FileExist(serverFile))
+        {
+            // Read file to check if it has been updated recently
+            ItemQueue queue = new ItemQueue();
+            JsonFileLoader<ItemQueue>.JsonLoadFile(serverFile, queue);
+            
+            if (queue && queue.last_updated && queue.last_updated.IndexOf("server_sync_") == 0)
+            {
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Detected server sync file update: %1", queue.last_updated);
+                
+                // Refresh menu if it's open
+                if (NightroItemGiverUIManager.IsMenuOpen())
+                {
+                    NightroItemGiverUIManager.RefreshMenuIfOpen();
+                }
+            }
+        }
     }
     
     // CRITICAL: Handle sync messages from server
@@ -72,9 +104,9 @@ modded class MissionGameplay
         if (player)
         {
             // Check if this is a sync message
-            if (message.IndexOf("[NIGHTRO_SYNC_") == 0)
+            if (message.IndexOf("[NIGHTRO_SYNC_FILE]") == 0)
             {
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Received sync message from server");
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Received sync message from SendNightroNotification: %1", message);
                 NightroItemSyncClient.ProcessSyncMessage(message);
                 return; // Don't display sync messages as regular chat
             }

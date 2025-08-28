@@ -69,7 +69,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         
         // Force refresh when showing - request fresh data from server
         RequestServerSync();
-        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 500, false);
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1000, false);
     }
     
     override void OnHide()
@@ -100,7 +100,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         {
             PrintFormat("[NIGHTRO CLIENT DEBUG] Refresh button clicked");
             RequestServerSync();
-            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1000, false);
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1500, false);
             return true;
         }
         
@@ -161,29 +161,31 @@ class NightroItemGiverMenu extends UIScriptedMenu
         
         string steamID = player.GetIdentity().GetPlainId();
         string playerName = player.GetIdentity().GetName();
-        string filePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        
+        // ⭐ CRITICAL FIX: Always try to read server file directly first
+        string serverFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        string filePath = serverFilePath; // Always use server file path
         
         PrintFormat("[NIGHTRO CLIENT DEBUG] === Loading Pending Items ===");
         PrintFormat("[NIGHTRO CLIENT DEBUG] Player: %1 (%2)", playerName, steamID);
-        PrintFormat("[NIGHTRO CLIENT DEBUG] File path: %1", filePath);
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Direct server file path: %1", filePath);
         
         ClearItemWidgets();
         
         if (!FileExist(filePath))
         {
-            PrintFormat("[NIGHTRO CLIENT DEBUG] File doesn't exist: %1", filePath);
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Server file doesn't exist: %1", filePath);
             UpdateEmptyState("Waiting for server data...");
-            UpdateStatusText("Requesting data from server");
-            RequestServerSync(); // Auto-request sync if no file exists
+            UpdateStatusText("No server data file found");
             return;
         }
         
-        // Read file content as string first for debugging
+        // ⭐ ALWAYS read server file content as string first for debugging
         FileHandle fileHandle = OpenFile(filePath, FileMode.READ);
         if (!fileHandle)
         {
-            PrintFormat("[NIGHTRO CLIENT ERROR] Cannot open file: %1", filePath);
-            UpdateEmptyState("Error reading item data");
+            PrintFormat("[NIGHTRO CLIENT ERROR] Cannot open server file: %1", filePath);
+            UpdateEmptyState("Error reading server data");
             return;
         }
         
@@ -195,22 +197,33 @@ class NightroItemGiverMenu extends UIScriptedMenu
         }
         CloseFile(fileHandle);
         
-        int maxChars = 200;
+        int maxChars = 800;
         if (fileContent.Length() < maxChars) maxChars = fileContent.Length();
-        PrintFormat("[NIGHTRO CLIENT DEBUG] Raw file content (first %1 chars): %2", maxChars, fileContent.Substring(0, maxChars));
+        PrintFormat("[NIGHTRO CLIENT DEBUG] DIRECT server file content (%1 chars): %2", 
+            fileContent.Length(), fileContent.Substring(0, maxChars));
+        
+        // Check if this looks like it has items
+        if (fileContent.IndexOf("\"items_to_give\": []") >= 0)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Server file has empty items_to_give array");
+        }
+        else if (fileContent.IndexOf("\"classname\"") >= 0)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Server file appears to contain items!");
+        }
         
         // Load the file using JsonFileLoader
         ItemQueue itemQueue = new ItemQueue();
         JsonFileLoader<ItemQueue>.JsonLoadFile(filePath, itemQueue);
         
-        PrintFormat("[NIGHTRO CLIENT DEBUG] JsonLoadFile completed");
+        PrintFormat("[NIGHTRO CLIENT DEBUG] JsonLoadFile completed on server file");
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue object created: %1", itemQueue != null);
         
         if (!itemQueue)
         {
-            PrintFormat("[NIGHTRO CLIENT ERROR] Failed to load JSON file - itemQueue is null");
-            UpdateEmptyState("Error loading item data");
-            UpdateStatusText("Failed to load items. Try refreshing.");
+            PrintFormat("[NIGHTRO CLIENT ERROR] Failed to load JSON from server file");
+            UpdateEmptyState("Error loading server data");
+            UpdateStatusText("Failed to parse server file");
             return;
         }
         
@@ -220,7 +233,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue items_to_give exists: %1", itemQueue.items_to_give != null);
         
         // Check if this is an empty sync
-        if (itemQueue.last_updated == "empty")
+        if (itemQueue.last_updated.IndexOf("empty") >= 0)
         {
             PrintFormat("[NIGHTRO CLIENT DEBUG] Received empty sync from server");
             UpdateEmptyState("No pending items");
@@ -235,11 +248,11 @@ class NightroItemGiverMenu extends UIScriptedMenu
         }
         
         int itemCount = itemQueue.items_to_give.Count();
-        PrintFormat("[NIGHTRO CLIENT DEBUG] Items count: %1", itemCount);
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Items count from server file: %1", itemCount);
         
         if (itemCount == 0)
         {
-            PrintFormat("[NIGHTRO CLIENT DEBUG] No items found in file");
+            PrintFormat("[NIGHTRO CLIENT DEBUG] No items found in server file");
             UpdateEmptyState("No pending items");
             UpdateStatusText("No items waiting for delivery");
             return;
@@ -248,33 +261,40 @@ class NightroItemGiverMenu extends UIScriptedMenu
         // Clear and populate items
         m_PendingItems.Clear();
         
-        PrintFormat("[NIGHTRO CLIENT DEBUG] === Processing Items ===");
+        PrintFormat("[NIGHTRO CLIENT DEBUG] === Processing Items From Server File ===");
         for (int i = 0; i < itemCount; i++)
         {
             ItemInfo item = itemQueue.items_to_give.Get(i);
             if (item)
             {
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Item %1: classname='%2', quantity=%3, status='%4'", 
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Server Item %1: classname='%2', quantity=%3, status='%4'", 
                     i, item.classname, item.quantity, item.status);
                 
+                // Accept items with empty status as pending
                 if (item.classname != "" && item.quantity > 0)
                 {
+                    if (item.status == "")
+                    {
+                        item.status = "pending"; // Set default status
+                    }
+                    
                     m_PendingItems.Insert(item);
-                    PrintFormat("[NIGHTRO CLIENT DEBUG] Added item to pending list: %1 x%2", item.classname, item.quantity);
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Added server item to pending list: %1 x%2 (status: %3)", 
+                        item.classname, item.quantity, item.status);
                 }
                 else
                 {
-                    PrintFormat("[NIGHTRO CLIENT DEBUG] Skipped invalid item: classname='%1', quantity=%2", 
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Skipped invalid server item: classname='%1', quantity=%2", 
                         item.classname, item.quantity);
                 }
             }
             else
             {
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Item %1 is null", i);
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Server Item %1 is null", i);
             }
         }
         
-        PrintFormat("[NIGHTRO CLIENT DEBUG] Final pending items count: %1", m_PendingItems.Count());
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Final pending items count from server: %1", m_PendingItems.Count());
         
         if (m_PendingItems.Count() > 0)
         {

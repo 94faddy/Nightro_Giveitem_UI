@@ -45,18 +45,57 @@ class NightroItemSyncManager
         if (serverQueue.items_to_give)
         {
             itemCount = serverQueue.items_to_give.Count();
+            
+            // ⭐ DEBUG: Print actual items in server queue
+            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: === DETAILED ITEMS DEBUG ===");
+            for (int x = 0; x < itemCount; x++)
+            {
+                ItemInfo serverItem = serverQueue.items_to_give.Get(x);
+                if (serverItem)
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Item %1: class='%2', qty=%3, status='%4'", 
+                        x, serverItem.classname, serverItem.quantity, serverItem.status);
+                }
+                else
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Item %1: NULL", x);
+                }
+            }
         }
+        
         PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: - Items count: %1", itemCount);
         PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: - Last updated: %1", serverQueue.last_updated);
         
-        // Update timestamp to indicate fresh sync
+        // Update timestamp to indicate fresh sync  
         int currentTime = (int)GetGame().GetTime();
         serverQueue.last_updated = "server_sync_" + currentTime.ToString();
         
-        // Save back to server file first
-        JsonFileLoader<ItemQueue>.JsonSaveFile(serverFilePath, serverQueue);
+        // ⭐ CRITICAL FIX: Don't save back to server file to avoid timing issues
+        // Just send the current data as-is
         
-        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Updated server file with new timestamp");
+        // ⭐ Send file content directly in sync message
+        string rawFileContent = "";
+        FileHandle fileRead = OpenFile(serverFilePath, FileMode.READ);
+        if (fileRead)
+        {
+            string line;
+            while (FGets(fileRead, line) >= 0)
+            {
+                rawFileContent += line;
+            }
+            CloseFile(fileRead);
+            
+            // Debug raw content
+            int debugLen = 500;
+            if (rawFileContent.Length() < debugLen) debugLen = rawFileContent.Length();
+            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Raw file content (%1 chars): %2", 
+                rawFileContent.Length(), rawFileContent.Substring(0, debugLen));
+        }
+        
+        // Send sync command with file content indicator
+        string syncCommand = "[NIGHTRO_SYNC_FILE]" + steamID + "|" + itemCount.ToString() + "|" + currentTime.ToString();
+        GetGame().ChatMP(player, syncCommand, "ColorBlue");
+        
         PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: === DIRECT FILE SYNC COMPLETED ===");
         
         // Send success notification
@@ -84,7 +123,31 @@ class NightroItemSyncManager
         string serverFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
         JsonFileLoader<ItemQueue>.JsonSaveFile(serverFilePath, emptyQueue);
         
+        // Notify client about empty sync
+        string syncCommand = "[NIGHTRO_SYNC_FILE]" + steamID + "|0|" + currentTime.ToString();
+        PlayerBase player = GetPlayerBySteamID(steamID);
+        if (player)
+        {
+            GetGame().ChatMP(player, syncCommand, "ColorBlue");
+        }
+        
         PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Created empty server file");
+    }
+    
+    static PlayerBase GetPlayerBySteamID(string steamID)
+    {
+        array<Man> players = new array<Man>;
+        GetGame().GetPlayers(players);
+        
+        for (int i = 0; i < players.Count(); i++)
+        {
+            PlayerBase player = PlayerBase.Cast(players.Get(i));
+            if (player && player.GetIdentity() && player.GetIdentity().GetPlainId() == steamID)
+            {
+                return player;
+            }
+        }
+        return null;
     }
     
     static void SendEmptyDataNotification(PlayerBase player)
@@ -239,13 +302,151 @@ class NightroItemSyncManager
     }
 }
 
-// Client-side sync handler - SIMPLIFIED
+// Client-side sync handler - SIMPLIFIED VERSION
 class NightroItemSyncClient
 {
     static void ProcessSyncMessage(string message)
     {
-        // Legacy function - no longer used with direct file sync
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Legacy sync message processing (not used)");
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Processing sync message: %1", message);
+        
+        if (message.IndexOf("[NIGHTRO_SYNC_FILE]") != 0)
+        {
+            PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Not a file sync message");
+            return;
+        }
+        
+        // Parse sync message format: [NIGHTRO_SYNC_FILE]steamid|itemcount|timestamp
+        string messageData = message.Substring(19, message.Length() - 19); // Remove "[NIGHTRO_SYNC_FILE]"
+        array<string> parts = new array<string>;
+        messageData.Split("|", parts);
+        
+        if (parts.Count() < 3)
+        {
+            PrintFormat("[NIGHTRO SYNC ERROR] CLIENT: Invalid sync message format - need 3 parts, got %1", parts.Count());
+            return;
+        }
+        
+        string steamID = parts.Get(0);
+        int itemCount = parts.Get(1).ToInt();
+        string timestamp = parts.Get(2);
+        
+        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+        if (!player || !player.GetIdentity() || player.GetIdentity().GetPlainId() != steamID)
+        {
+            PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Sync message not for current player");
+            return;
+        }
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Processing file sync for %1 items", itemCount);
+        
+        // ⭐ WAIT and then read server file directly
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ReadServerFileDirectly, 500, false, steamID, player.GetIdentity().GetName(), timestamp, itemCount);
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Scheduled delayed file read");
+    }
+    
+    static void ReadServerFileDirectly(string steamID, string playerName, string timestamp, int expectedItems)
+    {
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: === READING SERVER FILE DIRECTLY ===");
+        
+        string serverFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        string clientFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        
+        // Ensure client directory exists
+        string pendingDir = "$profile:NightroItemGiverData/pending_items/";
+        if (!FileExist(pendingDir))
+        {
+            MakeDirectory("$profile:NightroItemGiverData/");
+            MakeDirectory(pendingDir);
+        }
+        
+        // Check if server file exists
+        if (!FileExist(serverFilePath))
+        {
+            PrintFormat("[NIGHTRO SYNC ERROR] CLIENT: Server file does not exist: %1", serverFilePath);
+            CreateEmptyClientFile(steamID, playerName, clientFilePath);
+            return;
+        }
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Server file exists, reading directly: %1", serverFilePath);
+        
+        // Read raw file content for debug
+        string rawContent = "";
+        FileHandle rawFile = OpenFile(serverFilePath, FileMode.READ);
+        if (rawFile)
+        {
+            string line;
+            while (FGets(rawFile, line) >= 0)
+            {
+                rawContent += line;
+            }
+            CloseFile(rawFile);
+            
+            int debugLen = 1000;
+            if (rawContent.Length() < debugLen) debugLen = rawContent.Length();
+            PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Direct raw server file (%1 chars): %2", 
+                rawContent.Length(), rawContent.Substring(0, debugLen));
+        }
+        
+        // Read using JsonFileLoader
+        ItemQueue serverQueue = new ItemQueue();
+        JsonFileLoader<ItemQueue>.JsonLoadFile(serverFilePath, serverQueue);
+        
+        if (!serverQueue)
+        {
+            PrintFormat("[NIGHTRO SYNC ERROR] CLIENT: Failed to parse server file");
+            CreateEmptyClientFile(steamID, playerName, clientFilePath);
+            return;
+        }
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: === DIRECT SERVER FILE ANALYSIS ===");
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Player: %1", serverQueue.player_name);
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Steam ID: %1", serverQueue.steam_id);
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Last updated: %1", serverQueue.last_updated);
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Items array exists: %1", serverQueue.items_to_give != null);
+        
+        int actualCount = 0;
+        if (serverQueue.items_to_give)
+        {
+            actualCount = serverQueue.items_to_give.Count();
+            PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Direct items count: %1", actualCount);
+            
+            for (int i = 0; i < actualCount; i++)
+            {
+                ItemInfo item = serverQueue.items_to_give.Get(i);
+                if (item)
+                {
+                    PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Direct Item %1: class='%2', qty=%3, status='%4'", 
+                        i, item.classname, item.quantity, item.status);
+                }
+            }
+        }
+        
+        // Update timestamp for client version
+        serverQueue.last_updated = "direct_client_sync_" + timestamp;
+        
+        // Save as client file (this IS the same file but with updated timestamp)
+        JsonFileLoader<ItemQueue>.JsonSaveFile(clientFilePath, serverQueue);
+        
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Saved client file with %1 items", actualCount);
+        
+        // If menu is open, it should now be able to read the items
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: File sync completed - menu can now load items");
+    }
+    
+    static void CreateEmptyClientFile(string steamID, string playerName, string clientFilePath)
+    {
+        ItemQueue emptyQueue = new ItemQueue();
+        emptyQueue.steam_id = steamID;
+        emptyQueue.player_name = playerName;
+        emptyQueue.last_updated = "empty_client_direct";
+        emptyQueue.items_to_give = new array<ref ItemInfo>;
+        emptyQueue.processed_items = new array<ref ProcessedItemInfo>;
+        emptyQueue.player_state = new PlayerStateInfo();
+        emptyQueue.player_state.steam_id = steamID;
+        
+        JsonFileLoader<ItemQueue>.JsonSaveFile(clientFilePath, emptyQueue);
+        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Created empty direct client file");
     }
     
     static void RequestItemDelivery(string itemClass, int quantity)
