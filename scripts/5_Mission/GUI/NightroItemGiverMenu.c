@@ -162,9 +162,9 @@ class NightroItemGiverMenu extends UIScriptedMenu
         string steamID = player.GetIdentity().GetPlainId();
         string playerName = player.GetIdentity().GetName();
         
-        // ⭐ CRITICAL FIX: Always try to read server file directly first
+        // Always use server file path
         string serverFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
-        string filePath = serverFilePath; // Always use server file path
+        string filePath = serverFilePath;
         
         PrintFormat("[NIGHTRO CLIENT DEBUG] === Loading Pending Items ===");
         PrintFormat("[NIGHTRO CLIENT DEBUG] Player: %1 (%2)", playerName, steamID);
@@ -180,7 +180,9 @@ class NightroItemGiverMenu extends UIScriptedMenu
             return;
         }
         
-        // ⭐ ALWAYS read server file content as string first for debugging
+        // ⭐ CRITICAL FIX: Safe file reading with validation
+        string fileContent = "";
+        
         FileHandle fileHandle = OpenFile(filePath, FileMode.READ);
         if (!fileHandle)
         {
@@ -189,17 +191,39 @@ class NightroItemGiverMenu extends UIScriptedMenu
             return;
         }
         
-        string fileContent = "";
         string line;
-        while (FGets(fileHandle, line) >= 0)
+        int lineCount = 0;
+        while (FGets(fileHandle, line) >= 0 && lineCount < 1000)
         {
             fileContent += line;
+            lineCount++;
         }
         CloseFile(fileHandle);
         
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Successfully read file with %1 lines", lineCount);
+        
+        if (fileContent == "")
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] File read failed or empty content");
+            UpdateEmptyState("No data available");
+            UpdateStatusText("Server file is empty");
+            return;
+        }
+        
+        // ⭐ CRITICAL FIX: Validate JSON content before parsing
+        if (!IsValidJSONContent(fileContent))
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] Invalid JSON content detected, attempting to recreate");
+            DeleteFile(filePath); // Delete corrupted file
+            UpdateEmptyState("Server data corrupted, requesting refresh...");
+            UpdateStatusText("Data corrupted - requesting fresh data");
+            RequestServerSync(); // Request fresh data from server
+            return;
+        }
+        
         int maxChars = 800;
         if (fileContent.Length() < maxChars) maxChars = fileContent.Length();
-        PrintFormat("[NIGHTRO CLIENT DEBUG] DIRECT server file content (%1 chars): %2", 
+        PrintFormat("[NIGHTRO CLIENT DEBUG] File content (%1 chars): %2", 
             fileContent.Length(), fileContent.Substring(0, maxChars));
         
         // Check if this looks like it has items
@@ -212,18 +236,29 @@ class NightroItemGiverMenu extends UIScriptedMenu
             PrintFormat("[NIGHTRO CLIENT DEBUG] Server file appears to contain items!");
         }
         
-        // Load the file using JsonFileLoader
+        // ⭐ CRITICAL FIX: Safe JSON loading with validation  
         ItemQueue itemQueue = new ItemQueue();
         JsonFileLoader<ItemQueue>.JsonLoadFile(filePath, itemQueue);
-        
-        PrintFormat("[NIGHTRO CLIENT DEBUG] JsonLoadFile completed on server file");
-        PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue object created: %1", itemQueue != null);
         
         if (!itemQueue)
         {
             PrintFormat("[NIGHTRO CLIENT ERROR] Failed to load JSON from server file");
+            DeleteFile(filePath);
             UpdateEmptyState("Error loading server data");
             UpdateStatusText("Failed to parse server file");
+            RequestServerSync();
+            return;
+        }
+        
+        PrintFormat("[NIGHTRO CLIENT DEBUG] JsonLoadFile completed successfully");
+        
+        if (!itemQueue)
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] Failed to load JSON from server file");
+            DeleteFile(filePath); // Delete corrupted file
+            UpdateEmptyState("Error loading server data");
+            UpdateStatusText("Failed to parse server file");
+            RequestServerSync(); // Request fresh data from server
             return;
         }
         
@@ -309,6 +344,55 @@ class NightroItemGiverMenu extends UIScriptedMenu
         }
         
         UpdateButtonStates();
+    }
+    
+    // ⭐ NEW: Validate JSON content before parsing
+    bool IsValidJSONContent(string content)
+    {
+        if (content == "" || content.Length() < 10)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Content too short to be valid JSON");
+            return false;
+        }
+        
+        // Check for basic JSON structure
+        if (content.IndexOf("{") < 0 || content.IndexOf("}") < 0)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Missing basic JSON brackets");
+            return false;
+        }
+        
+        // Check for required fields
+        if (content.IndexOf("\"steam_id\"") < 0)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Missing required steam_id field");
+            return false;
+        }
+        
+        if (content.IndexOf("\"items_to_give\"") < 0)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Missing required items_to_give field");
+            return false;
+        }
+        
+        // Check for basic JSON syntax issues
+        int openBraces = 0;
+        int closeBraces = 0;
+        for (int i = 0; i < content.Length(); i++)
+        {
+            string char = content.Get(i);
+            if (char == "{") openBraces++;
+            if (char == "}") closeBraces++;
+        }
+        
+        if (openBraces != closeBraces)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Mismatched braces: open=%1, close=%2", openBraces, closeBraces);
+            return false;
+        }
+        
+        PrintFormat("[NIGHTRO CLIENT DEBUG] JSON content appears valid");
+        return true;
     }
     
     void ClearItemWidgets()

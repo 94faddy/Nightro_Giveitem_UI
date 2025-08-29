@@ -49,60 +49,54 @@ class NightroItemSyncManager
         PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: === SYNC COMPLETED ===");
     }
     
-    // ⭐ NEW: Send data via encoded chat message
+    // ⭐ FIXED: Simplified sync data transmission - use direct file writing instead of encoding
     static void SendSyncDataToClient(PlayerBase player, string jsonData)
     {
-        if (!player) return;
+        if (!player || !player.GetIdentity()) return;
         
-        // Encode data in base64-like format to avoid parsing issues
-        string encodedData = EncodeItemData(jsonData);
+        string steamID = player.GetIdentity().GetPlainId();
+        string clientFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
         
-        // Split into chunks if needed (chat message limit)
-        int chunkSize = 400; // Safe chunk size
-        int totalChunks = Math.Ceil(encodedData.Length() / (float)chunkSize);
+        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Writing sync data directly to client file");
         
-        if (totalChunks <= 1)
+        // Ensure directory exists
+        string pendingDir = "$profile:NightroItemGiverData/pending_items/";
+        if (!FileExist(pendingDir))
         {
-            // Send single message
-            string syncMsg = "[NIGHTRO_SYNC_DATA]SINGLE|" + encodedData;
-            GetGame().ChatMP(player, syncMsg, "ColorBlue");
+            MakeDirectory("$profile:NightroItemGiverData/");
+            MakeDirectory(pendingDir);
+        }
+        
+        if (jsonData == "")
+        {
+            // Create empty data file
+            CreateEmptyClientFile(steamID, player.GetIdentity().GetName());
         }
         else
         {
-            // Send multiple chunks
-            for (int i = 0; i < totalChunks; i++)
+            // Write JSON data directly to client file (server writes to profile which is shared)
+            FileHandle fileWrite = OpenFile(clientFilePath, FileMode.WRITE);
+            if (fileWrite)
             {
-                int startIdx = i * chunkSize;
-                int length = Math.Min(chunkSize, encodedData.Length() - startIdx);
-                string chunk = encodedData.Substring(startIdx, length);
-                
-                string chunkMsg = "[NIGHTRO_SYNC_DATA]CHUNK|" + i.ToString() + "|" + totalChunks.ToString() + "|" + chunk;
-                GetGame().ChatMP(player, chunkMsg, "ColorBlue");
-                
-                // Small delay between chunks
-                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(DoNothing, 100 * i, false);
+                FPrint(fileWrite, jsonData);
+                CloseFile(fileWrite);
+                PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Successfully wrote sync data to client file");
+            }
+            else
+            {
+                PrintFormat("[NIGHTRO SYNC ERROR] SERVER: Failed to write sync data to client file");
             }
         }
         
-        // Send completion notification
-        string notifyMsg = "[NIGHTRO SHOP] Data synchronized! Open menu (Ctrl+I) to see items.";
-        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 500, false, player, notifyMsg, "ColorGreen");
+        // ⭐ REDUCED SPAM: Only send notification if player has items
+        if (jsonData != "" && jsonData.IndexOf("\"items_to_give\": []") < 0)
+        {
+            string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open menu.";
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 1000, false, player, notifyMsg, "ColorYellow");
+        }
     }
     
     static void DoNothing() {} // Helper for delays
-    
-    // Simple encoding to avoid JSON parsing issues in chat
-    static string EncodeItemData(string data)
-    {
-        // Convert to hex string to avoid special characters
-        string encoded = "";
-        for (int i = 0; i < data.Length(); i++)
-        {
-            int charCode = data.Get(i).Hash();
-            encoded += charCode.ToString() + ",";
-        }
-        return encoded;
-    }
     
     static void CreateEmptyClientFile(string steamID, string playerName)
     {
@@ -293,166 +287,29 @@ class NightroItemSyncManager
     }
 }
 
-// Client-side sync handler - NEW VERSION
+// ⭐ FIXED: Simplified client-side sync handler - remove encoding/decoding
 class NightroItemSyncClient
 {
-    static ref array<string> m_ChunkBuffer;
-    static int m_ExpectedChunks = 0;
-    static int m_ReceivedChunks = 0;
-    
     static void ProcessSyncMessage(string message)
     {
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Processing sync message");
-        
-        if (message.IndexOf("[NIGHTRO_SYNC_DATA]") != 0)
+        // ⭐ REDUCED SPAM: Only process specific sync messages
+        if (message.IndexOf("[NIGHTRO SHOP]") == 0)
         {
-            PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Not a sync data message");
-            return;
-        }
-        
-        // Remove prefix
-        string messageData = message.Substring(19, message.Length() - 19);
-        
-        if (messageData.IndexOf("SINGLE|") == 0)
-        {
-            // Single message
-            string encodedData = messageData.Substring(7, messageData.Length() - 7);
-            string jsonData = DecodeItemData(encodedData);
-            ProcessReceivedData(jsonData);
-        }
-        else if (messageData.IndexOf("CHUNK|") == 0)
-        {
-            // Multi-part message
-            ProcessChunk(messageData.Substring(6, messageData.Length() - 6));
-        }
-    }
-    
-    static void ProcessChunk(string chunkData)
-    {
-        array<string> parts = new array<string>;
-        chunkData.Split("|", parts);
-        
-        if (parts.Count() < 3) return;
-        
-        int chunkIndex = parts.Get(0).ToInt();
-        int totalChunks = parts.Get(1).ToInt();
-        string chunkContent = parts.Get(2);
-        
-        // Initialize buffer if needed
-        if (!m_ChunkBuffer || m_ChunkBuffer.Count() != totalChunks)
-        {
-            m_ChunkBuffer = new array<string>;
-            for (int i = 0; i < totalChunks; i++)
+            // Only process messages that indicate items are waiting
+            if (message.IndexOf("You have items waiting!") > 0)
             {
-                m_ChunkBuffer.Insert("");
-            }
-            m_ExpectedChunks = totalChunks;
-            m_ReceivedChunks = 0;
-        }
-        
-        // Store chunk
-        m_ChunkBuffer.Set(chunkIndex, chunkContent);
-        m_ReceivedChunks++;
-        
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Received chunk %1/%2", m_ReceivedChunks, m_ExpectedChunks);
-        
-        // Check if all chunks received
-        if (m_ReceivedChunks >= m_ExpectedChunks)
-        {
-            string fullData = "";
-            for (int j = 0; j < m_ChunkBuffer.Count(); j++)
-            {
-                fullData += m_ChunkBuffer.Get(j);
-            }
-            
-            string jsonData = DecodeItemData(fullData);
-            ProcessReceivedData(jsonData);
-            
-            // Clear buffer
-            m_ChunkBuffer = null;
-            m_ExpectedChunks = 0;
-            m_ReceivedChunks = 0;
-        }
-    }
-    
-    static string DecodeItemData(string encoded)
-    {
-        string decoded = "";
-        array<string> codes = new array<string>;
-        encoded.Split(",", codes);
-        
-        for (int i = 0; i < codes.Count(); i++)
-        {
-            string code = codes.Get(i);
-            if (code != "")
-            {
-                int charCode = code.ToInt();
-                decoded += charCode.AsciiToString();
+                PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Items available notification received");
+                
+                // Note: UI refresh will be handled by MissionGameplay file update check
+                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(RefreshUI, 2000, false);
             }
         }
-        
-        return decoded;
-    }
-    
-    static void ProcessReceivedData(string jsonData)
-    {
-        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
-        if (!player || !player.GetIdentity()) return;
-        
-        string steamID = player.GetIdentity().GetPlainId();
-        string clientFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
-        
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Processing received JSON data");
-        
-        // Ensure directory exists
-        string pendingDir = "$profile:NightroItemGiverData/pending_items/";
-        if (!FileExist(pendingDir))
-        {
-            MakeDirectory("$profile:NightroItemGiverData/");
-            MakeDirectory(pendingDir);
-        }
-        
-        if (jsonData == "")
-        {
-            // Empty data
-            CreateEmptyClientFile(steamID, player.GetIdentity().GetName(), clientFilePath);
-        }
-        else
-        {
-            // Write JSON data to file
-            FileHandle fileWrite = OpenFile(clientFilePath, FileMode.WRITE);
-            if (fileWrite)
-            {
-                FPrint(fileWrite, jsonData);
-                CloseFile(fileWrite);
-                PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Saved sync data to client file");
-            }
-        }
-        
-        // Refresh menu if open
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: File sync completed - refreshing UI");
-        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(RefreshUI, 500, false);
     }
     
     static void RefreshUI()
     {
-        // This will be called from UI manager
         PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: UI refresh triggered");
-    }
-    
-    static void CreateEmptyClientFile(string steamID, string playerName, string clientFilePath)
-    {
-        ItemQueue emptyQueue = new ItemQueue();
-        emptyQueue.steam_id = steamID;
-        emptyQueue.player_name = playerName;
-        emptyQueue.last_updated = "empty_client";
-        emptyQueue.items_to_give = new array<ref ItemInfo>;
-        emptyQueue.processed_items = new array<ref ProcessedItemInfo>;
-        emptyQueue.player_state = new PlayerStateInfo();
-        emptyQueue.player_state.steam_id = steamID;
-        
-        JsonFileLoader<ItemQueue>.JsonSaveFile(clientFilePath, emptyQueue);
-        PrintFormat("[NIGHTRO SYNC DEBUG] CLIENT: Created empty client file");
+        // Note: UI refresh will be handled by MissionGameplay file update check
     }
     
     static void RequestItemDelivery(string itemClass, int quantity)

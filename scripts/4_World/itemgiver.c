@@ -150,6 +150,7 @@ class NightroItemGiverManager
     private static bool m_IsInitialized = false;
     private static ref NotificationSettings m_NotificationSettings;
     private static ref map<string, ref PlayerStateInfo> m_PlayerStates;
+    private static ref map<string, float> m_LastSyncTimes; // ⭐ NEW: Track sync times per player
 
     void NightroItemGiverManager()
     {
@@ -187,6 +188,7 @@ class NightroItemGiverManager
         }
 
         m_PlayerStates = new map<string, ref PlayerStateInfo>;
+        m_LastSyncTimes = new map<string, float>; // ⭐ NEW: Initialize sync tracking
         LoadNotificationSettings();
         
         // Register sync system
@@ -194,7 +196,7 @@ class NightroItemGiverManager
         {
             NightroItemSyncManager.RegisterEvents();
             GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessDeliveryRequests, 5000, true);
-            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessSyncRequests, 3000, true);
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessSyncRequests, 10000, true); // ⭐ REDUCED: From 3s to 10s
         }
         
         m_IsInitialized = true;
@@ -298,19 +300,14 @@ class NightroItemGiverManager
         }
     }
 
-    // SERVER ONLY: Process sync requests from clients
+    // ⭐ OPTIMIZED: Reduced sync frequency and prevent spam
     static void ProcessSyncRequests()
     {
         if (!GetGame().IsServer()) return;
         
-        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: ProcessSyncRequests() called");
-        
         string requestDir = IG_PROFILE_FOLDER + IG_SYNC_FOLDER;
-        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Checking directory: %1", requestDir);
-        
         if (!FileExist(requestDir)) 
         {
-            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Sync request directory doesn't exist, creating...");
             MakeDirectory(requestDir);
             return;
         }
@@ -318,7 +315,8 @@ class NightroItemGiverManager
         // Get all connected players
         array<Man> players = new array<Man>;
         GetGame().GetPlayers(players);
-        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Found %1 connected players", players.Count());
+        
+        float currentTime = GetGame().GetTime();
         
         for (int i = 0; i < players.Count(); i++)
         {
@@ -326,15 +324,23 @@ class NightroItemGiverManager
             if (!player || !player.GetIdentity()) continue;
             
             string steamID = player.GetIdentity().GetPlainId();
-            PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Checking sync requests for player: %1", steamID);
+            
+            // ⭐ CHECK: Don't sync too frequently for same player
+            if (m_LastSyncTimes.Contains(steamID))
+            {
+                float lastSync = m_LastSyncTimes.Get(steamID);
+                if (currentTime - lastSync < 30000) // 30 seconds cooldown
+                {
+                    continue; // Skip this player
+                }
+            }
             
             // Check for sync request files for this player
-            float currentTime = GetGame().GetTime();
             bool foundRequest = false;
             
-            for (int j = 0; j < 200; j++) // Check more timestamps
+            for (int j = 0; j < 50; j++) // Reduced from 200 to 50
             {
-                float checkTime = currentTime - (j * 500); // Check every 500ms back
+                float checkTime = currentTime - (j * 1000);
                 string fileName = steamID + "_" + ((int)checkTime).ToString() + ".txt";
                 string filePath = requestDir + fileName;
                 
@@ -343,24 +349,36 @@ class NightroItemGiverManager
                     PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Found sync request file: %1", fileName);
                     foundRequest = true;
                     
-                    // Send current data to client IMMEDIATELY
-                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 100, false, player);
+                    // Send current data to client
+                    NightroItemSyncManager.SyncItemDataToClient(player);
+                    m_LastSyncTimes.Set(steamID, currentTime); // ⭐ UPDATE: Track sync time
                     
                     // Delete request file
                     DeleteFile(filePath);
-                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Deleted sync request file and queued sync");
-                    break; // Process one request per player per cycle
+                    break;
                 }
             }
             
+            // ⭐ REDUCED AUTO SYNC: Only if player has items AND hasn't been synced recently
             if (!foundRequest)
             {
-                // Check if player has items but no sync request - auto sync
-                bool hasItems = NightroItemGiverManager.HasPendingItems(player);
+                bool hasItems = HasPendingItems(player);
                 if (hasItems)
                 {
-                    PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Player %1 has items but no recent sync request, forcing sync", steamID);
-                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 100, false, player);
+                    float lastAutoSync = 0;
+                    if (m_LastSyncTimes.Contains(steamID))
+                    {
+                        lastAutoSync = m_LastSyncTimes.Get(steamID);
+                    }
+                    
+                    // Only auto-sync once every 60 seconds
+                    if (currentTime - lastAutoSync > 60000)
+                    {
+                        PrintFormat("[NIGHTRO SYNC DEBUG] SERVER: Auto-syncing player %1 (has items, last sync: %2s ago)", 
+                            steamID, (currentTime - lastAutoSync) / 1000);
+                        NightroItemSyncManager.SyncItemDataToClient(player);
+                        m_LastSyncTimes.Set(steamID, currentTime);
+                    }
                 }
             }
         }
@@ -373,11 +391,8 @@ class NightroItemGiverManager
         string steamID = player.GetIdentity().GetPlainId();
         string filePath = IG_PROFILE_FOLDER + IG_PENDING_FOLDER + steamID + ".json";
         
-        PrintFormat("[NIGHTRO SERVER DEBUG] Checking pending items for player %1 at: %2", steamID, filePath);
-        
         if (!FileExist(filePath)) 
         {
-            PrintFormat("[NIGHTRO SERVER DEBUG] No pending items file found for player %1", steamID);
             return false;
         }
         
@@ -386,7 +401,6 @@ class NightroItemGiverManager
         
         if (!itemQueue || !itemQueue.items_to_give) 
         {
-            PrintFormat("[NIGHTRO SERVER DEBUG] Failed to load item queue or no items array for player %1", steamID);
             return false;
         }
         
@@ -400,7 +414,6 @@ class NightroItemGiverManager
             }
         }
         
-        PrintFormat("[NIGHTRO SERVER DEBUG] Player %1 has %2 pending items", steamID, itemCount);
         return itemCount > 0;
     }
 
@@ -413,19 +426,30 @@ class NightroItemGiverManager
             return false;
         }
 
-        // Check if territory validation is enabled
-        if (!m_NotificationSettings.require_territory_check)
+        // ⭐ SAFE: Check if territory validation is enabled and LBmaster is available
+        if (!m_NotificationSettings || !m_NotificationSettings.require_territory_check)
         {
             PrintFormat("[NIGHTRO SERVER DEBUG] Territory check disabled, allowing access");
             return true;
         }
 
-        LBGroup playerGroup = GetPlayerGroup(player);
+        // ⭐ CRITICAL: Check if LBmaster is available before using any LBmaster functions
+        #ifdef LBmaster_GroupDLCPlotpole
+        // Additional runtime check to ensure LBmaster is loaded
+        PlayerBase testPlayer = PlayerBase.Cast(player);
+        if (!testPlayer)
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Player cast failed, allowing access");
+            return true;
+        }
+        
+        LBGroup playerGroup = GetPlayerGroup(testPlayer);
+        
         if (!playerGroup)
         {
-            PrintFormat("[NIGHTRO SERVER DEBUG] Player %1 has no group", player.GetIdentity().GetPlainId());
+            PrintFormat("[NIGHTRO SERVER DEBUG] Player %1 has no group, checking distance to any plotpole", player.GetIdentity().GetPlainId());
             distanceToPlotpole = GetDistanceToNearestPlotpole(player.GetPosition());
-            return false;
+            return false; // Still require group membership
         }
 
         if (!GroupHasPlotpole(playerGroup))
@@ -438,6 +462,11 @@ class NightroItemGiverManager
         PrintFormat("[NIGHTRO SERVER DEBUG] Player %1 in territory: %2, distance: %3m", 
             player.GetIdentity().GetPlainId(), isInTerritory, distanceToPlotpole);
         return isInTerritory;
+        
+        #else
+        PrintFormat("[NIGHTRO SERVER DEBUG] LBmaster_GroupDLCPlotpole not available, allowing access");
+        return true;
+        #endif
     }
 
     static float GetDistanceToNearestPlotpole(vector playerPos)
@@ -445,16 +474,42 @@ class NightroItemGiverManager
         float nearestDistance = 999999.0;
         
         #ifdef LBmaster_GroupDLCPlotpole
+        // ⭐ ULTRA SAFE: Multiple checks before accessing TerritoryFlag system
+        
+        if (!TerritoryFlag) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag class not available");
+            return nearestDistance;
+        }
+        
+        if (!TerritoryFlag.all_Flags) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag.all_Flags not available");
+            return nearestDistance;
+        }
+        
+        int checkedFlags = 0;
         foreach (TerritoryFlag flag : TerritoryFlag.all_Flags)
         {
+            checkedFlags++;
             if (!flag) continue;
             
-            float distance = vector.Distance(playerPos, flag.GetPosition());
-            if (distance < nearestDistance)
+            // Safe position retrieval - just call GetPosition directly
+            vector flagPos = flag.GetPosition();
+            if (flagPos == "0 0 0") continue; // Invalid position
+            
+            // Safe vector distance calculation
+            float distance = vector.Distance(playerPos, flagPos);
+            if (distance >= 0 && distance < nearestDistance) // Additional safety check
             {
                 nearestDistance = distance;
             }
         }
+        
+        PrintFormat("[NIGHTRO SERVER DEBUG] Checked %1 flags for distance calculation", checkedFlags);
+        
+        #else
+        PrintFormat("[NIGHTRO SERVER DEBUG] LBmaster_GroupDLCPlotpole not defined");
         #endif
         
         return nearestDistance;
@@ -464,23 +519,61 @@ class NightroItemGiverManager
     {
         if (!playerGroup) return false;
         
+        // ⭐ ULTRA SAFE: Multiple safety checks before accessing LBmaster territory system
         #ifdef LBmaster_GroupDLCPlotpole
-        string tagLower = playerGroup.shortname + "";
+        
+        // Check if TerritoryFlag class exists
+        if (!TerritoryFlag) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag class not available");
+            return true; // Allow access if system not available
+        }
+        
+        // Check if all_Flags exists and is accessible
+        if (!TerritoryFlag.all_Flags) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag.all_Flags not available");
+            return true; // Allow access if flags not available
+        }
+        
+        // Safe group tag processing
+        string groupShortname = "";
+        if (playerGroup.shortname)
+        {
+            groupShortname = playerGroup.shortname + "";
+        }
+        else
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Group shortname not available");
+            return false;
+        }
+        
+        string tagLower = groupShortname;
         tagLower.ToLower();
         int groupTagHash = tagLower.Hash();
         
+        // Safe iteration through flags
+        int flagCount = 0;
         foreach (TerritoryFlag flag : TerritoryFlag.all_Flags)
         {
+            flagCount++;
             if (!flag) continue;
             
-            if (flag.ownerGroupTagHash == groupTagHash)
+            // Additional safety check for ownerGroupTagHash
+            if (flag.ownerGroupTagHash && flag.ownerGroupTagHash == groupTagHash)
             {
+                PrintFormat("[NIGHTRO SERVER DEBUG] Found plotpole for group %1", groupShortname);
                 return true;
             }
         }
-        #endif
         
+        PrintFormat("[NIGHTRO SERVER DEBUG] Checked %1 flags, no plotpole found for group %2", flagCount, groupShortname);
         return false;
+        
+        #else
+        PrintFormat("[NIGHTRO SERVER DEBUG] LBmaster_GroupDLCPlotpole not defined, allowing access");
+        return true; // Allow access if plotpole system not available
+        #endif
     }
 
     static LBGroup GetPlayerGroup(PlayerBase player)
@@ -488,7 +581,15 @@ class NightroItemGiverManager
         if (!player)
             return null;
             
-        return player.GetLBGroup();
+        // ⭐ SAFE: Add null checks for LBmaster calls
+        LBGroup group = player.GetLBGroup();
+        if (!group)
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Failed to get LBGroup for player");
+            return null;
+        }
+        
+        return group;
     }
 
     static bool IsPlayerInGroupTerritory(PlayerBase player, LBGroup playerGroup, out float distanceToNearestFriendlyFlag)
@@ -499,28 +600,80 @@ class NightroItemGiverManager
             return false;
 
         vector playerPos = player.GetPosition();
-        string groupTag = playerGroup.shortname;
-
+        
         #ifdef LBmaster_GroupDLCPlotpole
+        
+        // ⭐ ULTRA SAFE: Comprehensive safety checks
+        if (!TerritoryFlag) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag class not available");
+            return true; // Allow access if system not available
+        }
+        
+        if (!TerritoryFlag.all_Flags) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] TerritoryFlag.all_Flags not available");
+            return true; // Allow access if flags not available
+        }
+        
+        // Safe group tag processing
+        string groupTag = "";
+        if (playerGroup.shortname)
+        {
+            groupTag = playerGroup.shortname + "";
+        }
+        else
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Group shortname not available");
+            return false;
+        }
+        
         string groupTagLower = groupTag;
         groupTagLower.ToLower();
         int groupTagHash = groupTagLower.Hash();
         
-        TerritoryFlag nearestFriendlyFlag = TerritoryFlag.FindNearestFlag(playerPos, true, true, groupTagHash);
+        // Manual search for nearest friendly flag with maximum safety
+        TerritoryFlag nearestFriendlyFlag = null;
+        float nearestDistance = 999999.0;
+        int checkedFlags = 0;
+        
+        foreach (TerritoryFlag flag : TerritoryFlag.all_Flags)
+        {
+            checkedFlags++;
+            if (!flag) continue;
+            if (!flag.ownerGroupTagHash) continue;
+            if (flag.ownerGroupTagHash != groupTagHash) continue;
+            
+            // Safe position retrieval - call GetPosition directly
+            vector flagPos = flag.GetPosition();
+            if (flagPos == "0 0 0") continue;
+            
+            float distance = vector.Distance(playerPos, flagPos);
+            if (distance >= 0 && distance < nearestDistance) // Safety check for distance
+            {
+                nearestDistance = distance;
+                nearestFriendlyFlag = flag;
+            }
+        }
+        
+        PrintFormat("[NIGHTRO SERVER DEBUG] Checked %1 flags, found friendly flag: %2", checkedFlags, nearestFriendlyFlag != null);
         
         if (nearestFriendlyFlag)
         {
-            distanceToNearestFriendlyFlag = vector.Distance(playerPos, nearestFriendlyFlag.GetPosition());
+            distanceToNearestFriendlyFlag = nearestDistance;
             
-            if (nearestFriendlyFlag.IsInRadius(playerPos))
+            // Use safe manual radius check (standard plotpole radius 60m)
+            if (distanceToNearestFriendlyFlag <= 60.0)
             {
                 return true;
             }
         }
         
         return false;
+        
         #else
-        return true;
+        PrintFormat("[NIGHTRO SERVER DEBUG] LBmaster_GroupDLCPlotpole not defined, allowing access");
+        return true; // Allow access if plotpole system not available
         #endif
     }
 
@@ -719,6 +872,13 @@ class NightroItemGiverManager
     {
         if (!parentItem || !attachments || !player) return;
         
+        // SAFETY: Check if parent item is still valid
+        if (!parentItem.GetInventory()) 
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Parent item inventory not available, skipping attachments");
+            return;
+        }
+        
         for (int i = 0; i < attachments.Count(); i++)
         {
             AttachmentInfo attachment = attachments.Get(i);
@@ -730,98 +890,123 @@ class NightroItemGiverManager
                 continue;
             }
             
-            for (int j = 0; j < attachment.quantity; j++)
+            // SAFETY: Process one attachment at a time with validation
+            ProcessSingleAttachment(parentItem, attachment, player);
+        }
+    }
+    
+    // NEW: Safe single attachment processing
+    static void ProcessSingleAttachment(EntityAI parentItem, ref AttachmentInfo attachment, PlayerBase player)
+    {
+        if (!parentItem || !attachment || !player) return;
+        
+        // Additional safety checks
+        if (!parentItem.GetInventory())
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] Parent item lost inventory, giving to player instead");
+            GiveAttachmentToPlayer(attachment, player);
+            return;
+        }
+        
+        for (int j = 0; j < attachment.quantity; j++)
+        {
+            bool attachmentSuccess = false;
+            
+            if (Weapon_Base.Cast(parentItem) && IsMagazine(attachment.classname))
             {
-                if (Weapon_Base.Cast(parentItem) && IsMagazine(attachment.classname))
-                {
-                    Weapon_Base weapon = Weapon_Base.Cast(parentItem);
-                    
-                    if (CanAcceptMagazine(weapon, attachment.classname))
-                    {
-                        Magazine existingMag = weapon.GetMagazine(0);
-                        if (existingMag)
-                        {
-                            weapon.ServerDropEntity(existingMag);
-                            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ObjectDelete, 500, false, existingMag);
-                        }
-                        
-                        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(InstallMagazineDelayed, 800, false, weapon, attachment.classname, attachment);
-                    }
-                    else
-                    {
-                        EntityAI playerMagItem = player.GetInventory().CreateInInventory(attachment.classname);
-                        if (playerMagItem)
-                        {
-                            Magazine mag = Magazine.Cast(playerMagItem);
-                            if (mag) mag.ServerSetAmmoCount(mag.GetAmmoMax());
-                            UpdateAttachmentStatus(attachment, "delivered");
-                        }
-                        else
-                        {
-                            UpdateAttachmentStatus(attachment, "failed");
-                        }
-                    }
-                }
-                else
-                {
-                    EntityAI attachmentEntity = parentItem.GetInventory().CreateAttachment(attachment.classname);
-                    if (attachmentEntity)
-                    {
-                        UpdateAttachmentStatus(attachment, "delivered");
-                        
-                        if (attachment.attachments && attachment.attachments.Count() > 0)
-                        {
-                            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(AttachItemsToWeapon, 500, false, attachmentEntity, attachment.attachments, player);
-                        }
-                    }
-                    else
-                    {
-                        EntityAI playerAttachmentItem = player.GetInventory().CreateInInventory(attachment.classname);
-                        if (playerAttachmentItem)
-                        {
-                            UpdateAttachmentStatus(attachment, "delivered");
-                            
-                            if (attachment.attachments && attachment.attachments.Count() > 0)
-                            {
-                                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(AttachItemsToWeapon, 500, false, playerAttachmentItem, attachment.attachments, player);
-                            }
-                        }
-                        else
-                        {
-                            UpdateAttachmentStatus(attachment, "failed");
-                        }
-                    }
-                }
+                attachmentSuccess = ProcessWeaponMagazine(parentItem, attachment, player);
+            }
+            else
+            {
+                attachmentSuccess = ProcessRegularAttachment(parentItem, attachment, player, j);
+            }
+            
+            if (!attachmentSuccess)
+            {
+                PrintFormat("[NIGHTRO SERVER DEBUG] Failed to process attachment %1, giving to player", attachment.classname);
+                GiveAttachmentToPlayer(attachment, player);
             }
         }
     }
     
-    static void InstallMagazineDelayed(Weapon_Base weapon, string magazineClass, ref AttachmentInfo attachment)
+    // NEW: Safe weapon magazine processing
+    static bool ProcessWeaponMagazine(EntityAI parentItem, ref AttachmentInfo attachment, PlayerBase player)
     {
-        if (!weapon || magazineClass == "" || !attachment) return;
+        Weapon_Base weapon = Weapon_Base.Cast(parentItem);
+        if (!weapon) return false;
         
-        Magazine existingMag = weapon.GetMagazine(0);
-        if (existingMag)
+        if (CanAcceptMagazine(weapon, attachment.classname))
         {
-            return;
+            // SAFETY: Remove existing magazine safely
+            Magazine existingMag = weapon.GetMagazine(0);
+            if (existingMag)
+            {
+                // Instead of dropping, delete directly to avoid conflicts
+                weapon.ServerDropEntity(existingMag);
+                GetGame().ObjectDelete(existingMag);
+            }
+            
+            // SAFETY: Direct magazine attachment without delays
+            EntityAI newMag = weapon.GetInventory().CreateAttachment(attachment.classname);
+            if (newMag)
+            {
+                Magazine magazine = Magazine.Cast(newMag);
+                if (magazine)
+                {
+                    magazine.ServerSetAmmoCount(magazine.GetAmmoMax());
+                    UpdateAttachmentStatus(attachment, "delivered");
+                    return true;
+                }
+            }
         }
         
-        EntityAI newMag = weapon.GetInventory().CreateAttachment(magazineClass);
-        if (newMag)
+        return false;
+    }
+    
+    // NEW: Safe regular attachment processing
+    static bool ProcessRegularAttachment(EntityAI parentItem, ref AttachmentInfo attachment, PlayerBase player, int index)
+    {
+        EntityAI attachmentEntity = parentItem.GetInventory().CreateAttachment(attachment.classname);
+        if (attachmentEntity)
         {
-            Magazine magazine = Magazine.Cast(newMag);
-            if (magazine)
+            UpdateAttachmentStatus(attachment, "delivered");
+            
+            // SAFETY: Process nested attachments directly without delays
+            if (attachment.attachments && attachment.attachments.Count() > 0)
             {
-                magazine.ServerSetAmmoCount(magazine.GetAmmoMax());
-                UpdateAttachmentStatus(attachment, "delivered");
-                
-                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ValidateWeaponState, 500, false, weapon);
+                AttachItemsToWeapon(attachmentEntity, attachment.attachments, player);
             }
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // NEW: Safe fallback to give item to player
+    static void GiveAttachmentToPlayer(ref AttachmentInfo attachment, PlayerBase player)
+    {
+        if (!player || !player.GetInventory()) return;
+        
+        EntityAI playerItem = player.GetInventory().CreateInInventory(attachment.classname);
+        if (playerItem)
+        {
+            if (IsMagazine(attachment.classname))
+            {
+                Magazine mag = Magazine.Cast(playerItem);
+                if (mag) mag.ServerSetAmmoCount(mag.GetAmmoMax());
+            }
+            UpdateAttachmentStatus(attachment, "delivered");
         }
         else
         {
             UpdateAttachmentStatus(attachment, "failed");
         }
+    }
+    
+    // SIMPLIFIED: Remove dangerous delayed attachment processing
+    static void InstallMagazineDelayed(Weapon_Base weapon, string magazineClass, ref AttachmentInfo attachment)
+    {
+        // This function is no longer used - attachments are processed immediately
     }
     
     // CRITICAL FIX: Server-side only file creation - Client should NEVER create files
@@ -942,65 +1127,93 @@ modded class PlayerBase
     {
         super.OnConnect();
         
-        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player connecting: %1 (%2)", GetIdentity().GetName(), GetIdentity().GetPlainId());
-        
-        NightroItemGiverManager.UpdatePlayerState(this, "connect");
-        
-        // CRITICAL: Only create file on server side
-        NightroItemGiverManager.CreatePlayerFileIfNotExists(this);
-        
-        // Check if player has items after connection (SERVER SIDE ONLY)
-        if (GetGame().IsServer())
-        {
-            bool hasItems = NightroItemGiverManager.HasPendingItems(this);
-            if (hasItems)
-            {
-                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items, syncing to client", GetIdentity().GetPlainId());
-                
-                // Send notification about items available
-                string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
-                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 3000, false, this, notifyMsg, "ColorYellow");
-                
-                // Sync data to client
-                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 5000, false, this);
-            }
-            else
-            {
-                PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has no pending items, sending empty sync", GetIdentity().GetPlainId());
-                GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 3000, false, this);
-            }
-        }
+        // ⭐ CRITICAL FIX: Delay all processing to avoid interfering with vanilla systems
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessPlayerConnection, 2000, false, this);
     }
 
     override void EEOnCECreate()
     {
         super.EEOnCECreate();
         
+        // ⭐ CRITICAL FIX: Delay all processing to avoid interfering with vanilla spawn
         if (GetIdentity())
         {
-            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player spawned: %1 (%2)", GetIdentity().GetName(), GetIdentity().GetPlainId());
-            NightroItemGiverManager.UpdatePlayerState(this, "respawn");
-            
-            // Check items after spawn (SERVER SIDE ONLY)
-            if (GetGame().IsServer())
-            {
-                bool hasItems = NightroItemGiverManager.HasPendingItems(this);
-                if (hasItems)
-                {
-                    PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items after spawn", GetIdentity().GetPlainId());
-                    
-                    string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
-                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(GetGame().ChatMP, 2000, false, this, notifyMsg, "ColorYellow");
-                    
-                    // Sync data to client
-                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 3000, false, this);
-                }
-                else
-                {
-                    GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 2000, false, this);
-                }
-            }
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(ProcessPlayerSpawn, 3000, false, this);
         }
+    }
+    
+    // ⭐ NEW: Safe delayed connection processing
+    static void ProcessPlayerConnection(PlayerBase player)
+    {
+        if (!player || !player.GetIdentity()) return;
+        
+        // Only run on server side
+        if (!GetGame().IsServer()) return;
+        
+        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Processing delayed connection for: %1 (%2)", 
+            player.GetIdentity().GetName(), player.GetIdentity().GetPlainId());
+        
+        NightroItemGiverManager.UpdatePlayerState(player, "connect");
+        NightroItemGiverManager.CreatePlayerFileIfNotExists(player);
+        
+        // Check for pending items with additional delay
+        bool hasItems = NightroItemGiverManager.HasPendingItems(player);
+        if (hasItems)
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items, scheduling notification", 
+                player.GetIdentity().GetPlainId());
+            
+            // Longer delay to ensure player is fully loaded
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SendConnectionNotification, 5000, false, player);
+        }
+    }
+    
+    // ⭐ NEW: Safe delayed spawn processing  
+    static void ProcessPlayerSpawn(PlayerBase player)
+    {
+        if (!player || !player.GetIdentity()) return;
+        
+        // Only run on server side
+        if (!GetGame().IsServer()) return;
+        
+        PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Processing delayed spawn for: %1 (%2)", 
+            player.GetIdentity().GetName(), player.GetIdentity().GetPlainId());
+        
+        NightroItemGiverManager.UpdatePlayerState(player, "respawn");
+        
+        // Check for pending items after spawn
+        bool hasItems = NightroItemGiverManager.HasPendingItems(player);
+        if (hasItems)
+        {
+            PrintFormat("[NIGHTRO SERVER DEBUG] SERVER: Player %1 has pending items after spawn", 
+                player.GetIdentity().GetPlainId());
+            
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SendSpawnNotification, 4000, false, player);
+        }
+    }
+    
+    // ⭐ NEW: Safe notification sending
+    static void SendConnectionNotification(PlayerBase player)
+    {
+        if (!player || !player.GetIdentity()) return;
+        
+        string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
+        GetGame().ChatMP(player, notifyMsg, "ColorYellow");
+        
+        // Schedule sync with additional delay
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 3000, false, player);
+    }
+    
+    // ⭐ NEW: Safe spawn notification sending
+    static void SendSpawnNotification(PlayerBase player)
+    {
+        if (!player || !player.GetIdentity()) return;
+        
+        string notifyMsg = "[NIGHTRO SHOP] You have items waiting! Press Ctrl+I to open the delivery menu.";
+        GetGame().ChatMP(player, notifyMsg, "ColorYellow");
+        
+        // Schedule sync
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(NightroItemSyncManager.SyncItemDataToClient, 2000, false, player);
     }
 }
 

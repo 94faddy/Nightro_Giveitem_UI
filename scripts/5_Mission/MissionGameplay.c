@@ -61,9 +61,9 @@ modded class MissionGameplay
     {
         super.OnUpdate(timeslice);
         
-        // Check for sync messages via file system every 2 seconds
+        // ⭐ REDUCED: Check for file updates every 5 seconds (was 2 seconds)
         static float lastSyncCheck = 0;
-        if (GetGame().GetTime() - lastSyncCheck > 2000)
+        if (GetGame().GetTime() - lastSyncCheck > 5000)
         {
             lastSyncCheck = GetGame().GetTime();
             CheckForSyncUpdates();
@@ -78,7 +78,7 @@ modded class MissionGameplay
         string steamID = player.GetIdentity().GetPlainId();
         string clientFile = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
         
-        // Check if file was updated
+        // ⭐ REDUCED LOG SPAM: Only log significant changes
         static string lastUpdateTime = "";
         if (FileExist(clientFile))
         {
@@ -88,7 +88,12 @@ modded class MissionGameplay
             if (queue && queue.last_updated && queue.last_updated != lastUpdateTime)
             {
                 lastUpdateTime = queue.last_updated;
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Detected file update: %1", queue.last_updated);
+                
+                // Only log if it's a significant update (not just sync updates)
+                if (queue.last_updated.IndexOf("delivered_") >= 0 || queue.last_updated.IndexOf("created") >= 0)
+                {
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Detected significant file update: %1", queue.last_updated);
+                }
                 
                 // Refresh menu if it's open
                 if (NightroItemGiverUIManager.IsMenuOpen())
@@ -99,7 +104,7 @@ modded class MissionGameplay
         }
     }
     
-    // ⭐ FIXED: Properly handle chat messages for sync
+    // ⭐ REDUCED SPAM: Only process important shop notifications
     override void OnEvent(EventType eventTypeId, Param params)
     {
         super.OnEvent(eventTypeId, params);
@@ -111,19 +116,22 @@ modded class MissionGameplay
             {
                 string message = chatParams.param3; // The actual message content
                 
-                // Check for sync messages
-                if (message.IndexOf("[NIGHTRO_SYNC_DATA]") == 0)
+                // Only process shop notifications that need action
+                if (message.IndexOf("[NIGHTRO SHOP]") == 0)
                 {
-                    PrintFormat("[NIGHTRO CLIENT DEBUG] Intercepted sync message: %1", message.Substring(0, Math.Min(50, message.Length())));
-                    NightroItemSyncClient.ProcessSyncMessage(message);
+                    // Only log important messages, not routine sync notifications
+                    bool isImportant = false;
+                    if (message.IndexOf("You have items waiting!") > 0) isImportant = true;
+                    if (message.IndexOf("Successfully received:") > 0) isImportant = true; 
+                    if (message.IndexOf("ERROR") > 0) isImportant = true;
                     
-                    // Prevent the message from showing in chat
-                    chatParams.param3 = ""; // Clear the message
-                }
-                else if (message.IndexOf("[NIGHTRO SHOP]") == 0)
-                {
-                    // Let shop messages through but log them
-                    PrintFormat("[NIGHTRO CLIENT DEBUG] Shop message: %1", message);
+                    if (isImportant)
+                    {
+                        PrintFormat("[NIGHTRO CLIENT DEBUG] Important shop message: %1", message);
+                    }
+                    
+                    NightroItemSyncClient.ProcessSyncMessage(message);
+                    // Let the message show in chat normally
                 }
             }
         }
