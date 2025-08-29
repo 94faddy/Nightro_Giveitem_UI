@@ -76,17 +76,19 @@ modded class MissionGameplay
         if (!player || !player.GetIdentity()) return;
         
         string steamID = player.GetIdentity().GetPlainId();
-        string serverFile = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
+        string clientFile = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
         
-        if (FileExist(serverFile))
+        // Check if file was updated
+        static string lastUpdateTime = "";
+        if (FileExist(clientFile))
         {
-            // Read file to check if it has been updated recently
             ItemQueue queue = new ItemQueue();
-            JsonFileLoader<ItemQueue>.JsonLoadFile(serverFile, queue);
+            JsonFileLoader<ItemQueue>.JsonLoadFile(clientFile, queue);
             
-            if (queue && queue.last_updated && queue.last_updated.IndexOf("server_sync_") == 0)
+            if (queue && queue.last_updated && queue.last_updated != lastUpdateTime)
             {
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Detected server sync file update: %1", queue.last_updated);
+                lastUpdateTime = queue.last_updated;
+                PrintFormat("[NIGHTRO CLIENT DEBUG] Detected file update: %1", queue.last_updated);
                 
                 // Refresh menu if it's open
                 if (NightroItemGiverUIManager.IsMenuOpen())
@@ -97,21 +99,33 @@ modded class MissionGameplay
         }
     }
     
-    // CRITICAL: Handle sync messages from server
-    void SendNightroNotification(string message, string color = "ColorWhite")
+    // ⭐ FIXED: Properly handle chat messages for sync
+    override void OnEvent(EventType eventTypeId, Param params)
     {
-        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
-        if (player)
+        super.OnEvent(eventTypeId, params);
+        
+        if (eventTypeId == ChatMessageEventTypeID)
         {
-            // Check if this is a sync message
-            if (message.IndexOf("[NIGHTRO_SYNC_FILE]") == 0)
+            ChatMessageEventParams chatParams = ChatMessageEventParams.Cast(params);
+            if (chatParams)
             {
-                PrintFormat("[NIGHTRO CLIENT DEBUG] Received sync message from SendNightroNotification: %1", message);
-                NightroItemSyncClient.ProcessSyncMessage(message);
-                return; // Don't display sync messages as regular chat
+                string message = chatParams.param3; // The actual message content
+                
+                // Check for sync messages
+                if (message.IndexOf("[NIGHTRO_SYNC_DATA]") == 0)
+                {
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Intercepted sync message: %1", message.Substring(0, Math.Min(50, message.Length())));
+                    NightroItemSyncClient.ProcessSyncMessage(message);
+                    
+                    // Prevent the message from showing in chat
+                    chatParams.param3 = ""; // Clear the message
+                }
+                else if (message.IndexOf("[NIGHTRO SHOP]") == 0)
+                {
+                    // Let shop messages through but log them
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Shop message: %1", message);
+                }
             }
-            
-            GetGame().ChatMP(player, message, color);
         }
     }
 }
