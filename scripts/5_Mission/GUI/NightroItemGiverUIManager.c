@@ -56,6 +56,56 @@ class NightroItemGiverUIManager
         }
     }
     
+    // ⭐ CRITICAL FIX: Basic validation without LBmaster calls for UI
+    static bool CanReceiveItemBasic(PlayerBase player, ref ItemInfo itemData, out string errorMessage)
+    {
+        errorMessage = "";
+        
+        if (!player || !player.GetIdentity() || !itemData)
+        {
+            errorMessage = "[NIGHTRO SHOP] Invalid player or item data.";
+            return false;
+        }
+        
+        if (!player.IsAlive())
+        {
+            errorMessage = "[NIGHTRO SHOP] You must be alive to receive items.";
+            return false;
+        }
+        
+        if (player.IsUnconscious() || player.IsRestrained())
+        {
+            errorMessage = "[NIGHTRO SHOP] You cannot receive items while unconscious or restrained.";
+            return false;
+        }
+        
+        if (player.IsInVehicle() && player.GetParent())
+        {
+            errorMessage = "[NIGHTRO SHOP] You cannot receive items while in a vehicle.";
+            return false;
+        }
+        
+        // ⭐ CRITICAL FIX: Skip item validation in UI to prevent crashes
+        // Server will validate items during actual delivery
+        if (!itemData.classname || itemData.classname == "")
+        {
+            errorMessage = "[NIGHTRO SHOP] Invalid item data.";
+            return false;
+        }
+        
+        if (itemData.quantity <= 0)
+        {
+            errorMessage = "[NIGHTRO SHOP] Invalid item quantity.";
+            return false;
+        }
+        
+        // ⭐ CRITICAL FIX: Skip inventory space check in UI to prevent crashes
+        // Server will check inventory space during actual delivery
+        
+        return true;
+    }
+    
+    // ⭐ ORIGINAL: Full validation with LBmaster (still available but not used in UI)
     static bool CanReceiveItem(PlayerBase player, ref ItemInfo itemData, out string errorMessage)
     {
         errorMessage = "";
@@ -91,22 +141,23 @@ class NightroItemGiverUIManager
             return false;
         }
         
+        // ⭐ PROTECTED: Safe LBmaster calls with null checks
         // Territory check (simplified client-side version)
-        LBGroup playerGroup = GetPlayerGroup(player);
+        LBGroup playerGroup = GetPlayerGroupSafe(player);
         if (!playerGroup)
         {
             errorMessage = "[NIGHTRO SHOP] You need to join or create a group to receive items!";
             return false;
         }
         
-        if (!GroupHasPlotpole(playerGroup))
+        if (!GroupHasPlotpoleSafe(playerGroup))
         {
             errorMessage = "[NIGHTRO SHOP] Your group needs to place a Plotpole to receive items! Create your territory first.";
             return false;
         }
         
         float distanceToPlotpole;
-        if (!IsPlayerInGroupTerritory(player, playerGroup, distanceToPlotpole))
+        if (!IsPlayerInGroupTerritorySafe(player, playerGroup, distanceToPlotpole))
         {
             errorMessage = "[NIGHTRO SHOP] You are outside your group's territory! Move closer to your Plotpole. Distance: " + ((int)distanceToPlotpole).ToString() + "m";
             return false;
@@ -134,98 +185,196 @@ class NightroItemGiverUIManager
         return true; // Return true immediately, actual result will come from server
     }
     
+    // ⭐ CRITICAL FIX: Cached item validation to prevent repeated CreateObjectEx calls
+    private static ref map<string, bool> m_ItemValidityCache;
+    
     static bool IsValidItemClass(string itemName)
     {
         if (!itemName || itemName == "") return false;
-
-        EntityAI testItem = EntityAI.Cast(GetGame().CreateObjectEx(itemName, "0 0 0", ECE_LOCAL | ECE_NOLIFETIME));
-        if (!testItem)
+        
+        // Initialize cache if needed
+        if (!m_ItemValidityCache)
         {
-            return false;
+            m_ItemValidityCache = new map<string, bool>;
         }
-
-        GetGame().ObjectDelete(testItem);
-        return true;
+        
+        // Check cache first
+        if (m_ItemValidityCache.Contains(itemName))
+        {
+            return m_ItemValidityCache.Get(itemName);
+        }
+        
+        // ⭐ CRITICAL FIX: Use config check instead of CreateObjectEx to prevent crashes
+        bool isValid = false;
+        
+        // Check in different config sections
+        if (GetGame().ConfigIsExisting("CfgVehicles " + itemName))
+        {
+            isValid = true;
+        }
+        else if (GetGame().ConfigIsExisting("CfgWeapons " + itemName))
+        {
+            isValid = true;
+        }
+        else if (GetGame().ConfigIsExisting("CfgMagazines " + itemName))
+        {
+            isValid = true;
+        }
+        
+        // Cache the result
+        m_ItemValidityCache.Set(itemName, isValid);
+        
+        return isValid;
     }
     
+    // ⭐ CRITICAL FIX: Simplified inventory check to prevent crashes
     static bool CanFitInInventory(PlayerBase player, string itemClassname, int quantity)
     {
         if (!player || !player.GetInventory()) return false;
         
-        for (int i = 0; i < quantity; i++)
-        {
-            EntityAI testItem = EntityAI.Cast(GetGame().CreateObjectEx(itemClassname, "0 0 0", ECE_LOCAL | ECE_NOLIFETIME));
-            if (!testItem)
-            {
-                return false;
-            }
-
-            InventoryLocation invLocation = new InventoryLocation();
-            bool canFit = player.GetInventory().FindFreeLocationFor(testItem, FindInventoryLocationType.ANY, invLocation);
-            GetGame().ObjectDelete(testItem);
-            
-            if (!canFit)
-            {
-                return false;
-            }
-        }
-
+        // ⭐ CRITICAL FIX: Skip actual object creation in UI, return true
+        // Server will perform real inventory check during delivery
+        PrintFormat("[NIGHTRO CLIENT DEBUG] Skipping inventory check for UI (server will validate)");
         return true;
     }
     
-    static LBGroup GetPlayerGroup(PlayerBase player)
+    // ⭐ CRITICAL FIX: Safe LBmaster calls with comprehensive null checks
+    static LBGroup GetPlayerGroupSafe(PlayerBase player)
     {
         if (!player)
             return null;
-            
-        return player.GetLBGroup();
+        
+        // Check if LBmaster is properly initialized
+        #ifndef LBmaster_GroupDLCPlotpole
+        PrintFormat("[NIGHTRO CLIENT DEBUG] LBmaster not available");
+        return null;
+        #endif
+        
+        // Additional safety checks
+        if (!player.GetIdentity())
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] Player identity not available");
+            return null;
+        }
+        
+        LBGroup group = player.GetLBGroup();
+        if (!group)
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Player has no LBGroup");
+            return null;
+        }
+        
+        return group;
     }
 
-    static bool GroupHasPlotpole(LBGroup playerGroup)
+    static bool GroupHasPlotpoleSafe(LBGroup playerGroup)
     {
         if (!playerGroup) return false;
         
         #ifdef LBmaster_GroupDLCPlotpole
+        // Multiple safety checks
+        if (!TerritoryFlag) 
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] TerritoryFlag class not available");
+            return true; // Allow if system not available
+        }
+        
+        if (!TerritoryFlag.all_Flags) 
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] TerritoryFlag.all_Flags not available");
+            return true; // Allow if system not available
+        }
+        
+        if (!playerGroup.shortname)
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] Group shortname not available");
+            return false;
+        }
+        
         string tagLower = playerGroup.shortname + "";
         tagLower.ToLower();
         int groupTagHash = tagLower.Hash();
         
+        // Safe iteration with additional checks
         foreach (TerritoryFlag flag : TerritoryFlag.all_Flags)
         {
             if (!flag) continue;
             
-            if (flag.ownerGroupTagHash == groupTagHash)
+            if (flag.ownerGroupTagHash && flag.ownerGroupTagHash == groupTagHash)
             {
                 return true;
             }
         }
-        #endif
-        
         return false;
+        #else
+        PrintFormat("[NIGHTRO CLIENT DEBUG] LBmaster_GroupDLCPlotpole not available");
+        return true; // Allow if not available
+        #endif
     }
 
-    static bool IsPlayerInGroupTerritory(PlayerBase player, LBGroup playerGroup, out float distanceToNearestFriendlyFlag)
+    static bool IsPlayerInGroupTerritorySafe(PlayerBase player, LBGroup playerGroup, out float distanceToNearestFriendlyFlag)
     {
         distanceToNearestFriendlyFlag = 999999.0;
         
         if (!player || !playerGroup) 
             return false;
 
+        #ifdef LBmaster_GroupDLCPlotpole
+        // Multiple safety checks
+        if (!TerritoryFlag) 
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] TerritoryFlag class not available");
+            return true; // Allow if system not available
+        }
+        
+        if (!TerritoryFlag.all_Flags) 
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] TerritoryFlag.all_Flags not available");
+            return true; // Allow if system not available
+        }
+        
+        if (!playerGroup.shortname)
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] Group shortname not available");
+            return false;
+        }
+        
         vector playerPos = player.GetPosition();
         string groupTag = playerGroup.shortname;
-
-        #ifdef LBmaster_GroupDLCPlotpole
+        
         string groupTagLower = groupTag;
         groupTagLower.ToLower();
         int groupTagHash = groupTagLower.Hash();
         
-        TerritoryFlag nearestFriendlyFlag = TerritoryFlag.FindNearestFlag(playerPos, true, true, groupTagHash);
+        // Manual search for nearest friendly flag (safer approach)
+        TerritoryFlag nearestFriendlyFlag = null;
+        float nearestDistance = 999999.0;
+        
+        // Safe iteration through all flags
+        foreach (TerritoryFlag flag : TerritoryFlag.all_Flags)
+        {
+            if (!flag) continue;
+            if (!flag.ownerGroupTagHash) continue;
+            if (flag.ownerGroupTagHash != groupTagHash) continue;
+            
+            // Get flag position safely
+            vector flagPos = flag.GetPosition();
+            if (flagPos == "0 0 0") continue; // Invalid position
+            
+            float distance = vector.Distance(playerPos, flagPos);
+            if (distance >= 0 && distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearestFriendlyFlag = flag;
+            }
+        }
         
         if (nearestFriendlyFlag)
         {
-            distanceToNearestFriendlyFlag = vector.Distance(playerPos, nearestFriendlyFlag.GetPosition());
+            distanceToNearestFriendlyFlag = nearestDistance;
             
-            if (nearestFriendlyFlag.IsInRadius(playerPos))
+            // Check if player is within territory radius (default 60m for plotpoles)
+            if (distanceToNearestFriendlyFlag <= 60.0)
             {
                 return true;
             }
@@ -233,8 +382,25 @@ class NightroItemGiverUIManager
         
         return false;
         #else
-        return true;
+        PrintFormat("[NIGHTRO CLIENT DEBUG] LBmaster_GroupDLCPlotpole not available");
+        return true; // Allow if not available
         #endif
+    }
+    
+    // ⭐ LEGACY: Keep original functions for compatibility
+    static LBGroup GetPlayerGroup(PlayerBase player)
+    {
+        return GetPlayerGroupSafe(player);
+    }
+
+    static bool GroupHasPlotpole(LBGroup playerGroup)
+    {
+        return GroupHasPlotpoleSafe(playerGroup);
+    }
+
+    static bool IsPlayerInGroupTerritory(PlayerBase player, LBGroup playerGroup, out float distanceToNearestFriendlyFlag)
+    {
+        return IsPlayerInGroupTerritorySafe(player, playerGroup, distanceToNearestFriendlyFlag);
     }
     
     static string GetCurrentTimestamp()

@@ -13,6 +13,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
     
     private ref array<ref NightroItemWidget> m_ItemWidgets;
     private ref array<ref ItemInfo> m_PendingItems;
+    private bool m_IsInitialized = false;
     
     void NightroItemGiverMenu()
     {
@@ -52,8 +53,10 @@ class NightroItemGiverMenu extends UIScriptedMenu
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemScrollView: %1", m_ItemScrollView != null);
         PrintFormat("[NIGHTRO CLIENT DEBUG] StatusText: %1", m_StatusText != null);
         
-        // Load items immediately
-        LoadPendingItems();
+        m_IsInitialized = true;
+        
+        // ⭐ CRITICAL FIX: Delay loading to prevent LBmaster crashes
+        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SafeLoadPendingItems, 1500, false);
         
         return layoutRoot;
     }
@@ -67,9 +70,14 @@ class NightroItemGiverMenu extends UIScriptedMenu
         GetGame().GetInput().ChangeGameFocus(1);
         GetGame().GetUIManager().ShowUICursor(true);
         
-        // Force refresh when showing - request fresh data from server
+        // ⭐ CRITICAL FIX: Only request sync, don't immediately load items
         RequestServerSync();
-        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1000, false);
+        
+        // ⭐ CRITICAL FIX: Delay any LBmaster-related operations
+        if (m_IsInitialized)
+        {
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SafeLoadPendingItems, 2000, false);
+        }
     }
     
     override void OnHide()
@@ -100,7 +108,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         {
             PrintFormat("[NIGHTRO CLIENT DEBUG] Refresh button clicked");
             RequestServerSync();
-            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(LoadPendingItems, 1500, false);
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SafeLoadPendingItems, 1500, false);
             return true;
         }
         
@@ -149,7 +157,30 @@ class NightroItemGiverMenu extends UIScriptedMenu
         UpdateStatusText("Refreshing data from server...");
     }
     
-    void LoadPendingItems()
+    // ⭐ CRITICAL FIX: Safe loading with minimal system calls
+    void SafeLoadPendingItems()
+    {
+        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+        if (!player || !player.GetIdentity()) 
+        {
+            PrintFormat("[NIGHTRO CLIENT ERROR] No valid player found!");
+            UpdateEmptyState("No player data available");
+            return;
+        }
+        
+        // ⭐ CRITICAL FIX: Minimal safety checks - don't touch player inventory/state
+        if (!player.IsAlive())
+        {
+            PrintFormat("[NIGHTRO CLIENT DEBUG] Player not alive, delaying load");
+            GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(SafeLoadPendingItems, 2000, false);
+            return;
+        }
+        
+        // ⭐ CRITICAL FIX: Don't check player status or inventory here - just load file data
+        LoadPendingItemsWithoutValidation();
+    }
+    
+    void LoadPendingItemsWithoutValidation()
     {
         PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
         if (!player || !player.GetIdentity()) 
@@ -166,7 +197,7 @@ class NightroItemGiverMenu extends UIScriptedMenu
         string serverFilePath = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
         string filePath = serverFilePath;
         
-        PrintFormat("[NIGHTRO CLIENT DEBUG] === Loading Pending Items ===");
+        PrintFormat("[NIGHTRO CLIENT DEBUG] === Loading Pending Items (Safe Mode) ===");
         PrintFormat("[NIGHTRO CLIENT DEBUG] Player: %1 (%2)", playerName, steamID);
         PrintFormat("[NIGHTRO CLIENT DEBUG] Direct server file path: %1", filePath);
         
@@ -252,16 +283,6 @@ class NightroItemGiverMenu extends UIScriptedMenu
         
         PrintFormat("[NIGHTRO CLIENT DEBUG] JsonLoadFile completed successfully");
         
-        if (!itemQueue)
-        {
-            PrintFormat("[NIGHTRO CLIENT ERROR] Failed to load JSON from server file");
-            DeleteFile(filePath); // Delete corrupted file
-            UpdateEmptyState("Error loading server data");
-            UpdateStatusText("Failed to parse server file");
-            RequestServerSync(); // Request fresh data from server
-            return;
-        }
-        
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue player_name: '%1'", itemQueue.player_name);
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue steam_id: '%1'", itemQueue.steam_id);
         PrintFormat("[NIGHTRO CLIENT DEBUG] ItemQueue last_updated: '%1'", itemQueue.last_updated);
@@ -344,6 +365,12 @@ class NightroItemGiverMenu extends UIScriptedMenu
         }
         
         UpdateButtonStates();
+    }
+    
+    // Use the original LoadPendingItems name for compatibility
+    void LoadPendingItems()
+    {
+        LoadPendingItemsWithoutValidation();
     }
     
     // ⭐ NEW: Validate JSON content before parsing
@@ -556,8 +583,9 @@ class NightroItemGiverMenu extends UIScriptedMenu
         PrintFormat("[NIGHTRO CLIENT DEBUG] === Receive Item Clicked ===");
         PrintFormat("[NIGHTRO CLIENT DEBUG] Item: %1 x%2", itemData.classname, itemData.quantity);
         
+        // ⭐ CRITICAL FIX: Skip LBmaster validation during UI interaction
         string errorMessage;
-        bool canReceive = NightroItemGiverUIManager.CanReceiveItem(player, itemData, errorMessage);
+        bool canReceive = NightroItemGiverUIManager.CanReceiveItemBasic(player, itemData, errorMessage);
         
         if (!canReceive)
         {
@@ -605,7 +633,8 @@ class NightroItemGiverMenu extends UIScriptedMenu
             if (item.status == "pending" || item.status == "" || item.status == "inventory_full" || item.status == "territory_failed")
             {
                 string errorMessage;
-                if (NightroItemGiverUIManager.CanReceiveItem(player, item, errorMessage))
+                // ⭐ CRITICAL FIX: Use basic validation only
+                if (NightroItemGiverUIManager.CanReceiveItemBasic(player, item, errorMessage))
                 {
                     if (NightroItemGiverUIManager.GiveItemToPlayer(player, item))
                     {

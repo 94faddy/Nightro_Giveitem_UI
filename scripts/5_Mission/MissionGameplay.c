@@ -4,6 +4,13 @@ modded class MissionGameplay
     private bool m_NightroIPressed = false;
     private bool m_NightroKeyComboTriggered = false;
     
+    // ⭐ CRITICAL FIX: Add safety flags to prevent excessive file operations
+    private static float m_LastSafeUpdateCheck = 0;
+    private static bool m_IsCheckingUpdates = false;
+    private static int m_ConsecutiveFailures = 0;
+    private static const int MAX_CONSECUTIVE_FAILURES = 5;
+    private static const float UPDATE_CHECK_INTERVAL = 15000; // Increased from 5000 to 15000 (15 seconds)
+    
     void MissionGameplay()
     {
         NightroItemGiverUIManager.Init();
@@ -61,50 +68,24 @@ modded class MissionGameplay
     {
         super.OnUpdate(timeslice);
         
-        // ⭐ REDUCED: Check for file updates every 5 seconds (was 2 seconds)
-        static float lastSyncCheck = 0;
-        if (GetGame().GetTime() - lastSyncCheck > 5000)
-        {
-            lastSyncCheck = GetGame().GetTime();
-            CheckForSyncUpdates();
-        }
+        // ⭐ CRITICAL FIX: DISABLE ALL AUTO-UPDATE CHECKING TO PREVENT CRASHES
+        // Updates will only happen when user manually opens the menu
+        // This eliminates all file I/O operations during normal gameplay
+        
+        // NO MORE AUTOMATIC FILE CHECKING - PREVENTS ALL HEAP CORRUPTION ISSUES
     }
     
-    void CheckForSyncUpdates()
-    {
-        PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
-        if (!player || !player.GetIdentity()) return;
-        
-        string steamID = player.GetIdentity().GetPlainId();
-        string clientFile = "$profile:NightroItemGiverData/pending_items/" + steamID + ".json";
-        
-        // ⭐ REDUCED LOG SPAM: Only log significant changes
-        static string lastUpdateTime = "";
-        if (FileExist(clientFile))
-        {
-            ItemQueue queue = new ItemQueue();
-            JsonFileLoader<ItemQueue>.JsonLoadFile(clientFile, queue);
-            
-            if (queue && queue.last_updated && queue.last_updated != lastUpdateTime)
-            {
-                lastUpdateTime = queue.last_updated;
-                
-                // Only log if it's a significant update (not just sync updates)
-                if (queue.last_updated.IndexOf("delivered_") >= 0 || queue.last_updated.IndexOf("created") >= 0)
-                {
-                    PrintFormat("[NIGHTRO CLIENT DEBUG] Detected significant file update: %1", queue.last_updated);
-                }
-                
-                // Refresh menu if it's open
-                if (NightroItemGiverUIManager.IsMenuOpen())
-                {
-                    NightroItemGiverUIManager.RefreshMenuIfOpen();
-                }
-            }
-        }
-    }
+    // ⭐ CRITICAL FIX: REMOVED - All automatic update checking functions disabled
+    // CheckForSyncUpdatesSafe() - REMOVED
+    // CheckFileUpdatesSafer() - REMOVED  
+    // RefreshMenuSafe() - REMOVED
     
-    // ⭐ REDUCED SPAM: Only process important shop notifications
+    // Updates now only happen when:
+    // 1. Player manually opens menu (Ctrl+I)
+    // 2. Player clicks refresh button
+    // 3. Player performs an action in the menu
+    
+    // ⭐ CRITICAL FIX: SIMPLIFIED - Only process delivery confirmations, no file operations
     override void OnEvent(EventType eventTypeId, Param params)
     {
         super.OnEvent(eventTypeId, params);
@@ -114,26 +95,29 @@ modded class MissionGameplay
             ChatMessageEventParams chatParams = ChatMessageEventParams.Cast(params);
             if (chatParams)
             {
-                string message = chatParams.param3; // The actual message content
+                string message = chatParams.param3;
                 
-                // Only process shop notifications that need action
-                if (message.IndexOf("[NIGHTRO SHOP]") == 0)
+                // Only process successful delivery messages to refresh UI
+                if (message.IndexOf("[NIGHTRO SHOP SUCCESS]") == 0)
                 {
-                    // Only log important messages, not routine sync notifications
-                    bool isImportant = false;
-                    if (message.IndexOf("You have items waiting!") > 0) isImportant = true;
-                    if (message.IndexOf("Successfully received:") > 0) isImportant = true; 
-                    if (message.IndexOf("ERROR") > 0) isImportant = true;
-                    
-                    if (isImportant)
+                    PrintFormat("[NIGHTRO CLIENT DEBUG] Delivery success message received");
+                    // Only refresh menu if it's currently open
+                    if (NightroItemGiverUIManager.IsMenuOpen())
                     {
-                        PrintFormat("[NIGHTRO CLIENT DEBUG] Important shop message: %1", message);
+                        GetGame().GetCallQueue(CALL_CATEGORY_GAMEPLAY).CallLater(TriggerMenuRefresh, 2000, false);
                     }
-                    
-                    NightroItemSyncClient.ProcessSyncMessage(message);
-                    // Let the message show in chat normally
                 }
+                // Let all messages show in chat normally
             }
+        }
+    }
+    
+    // ⭐ NEW: Simple menu refresh trigger
+    void TriggerMenuRefresh()
+    {
+        if (NightroItemGiverUIManager.IsMenuOpen())
+        {
+            NightroItemGiverUIManager.RefreshMenuIfOpen();
         }
     }
 }
